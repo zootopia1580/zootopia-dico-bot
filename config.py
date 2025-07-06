@@ -17,7 +17,7 @@ DAILY_GOAL_SECONDS = 14400
 WEEKLY_GOAL_DAYS = 4
 
 # --- Database Settings ---
-DATABASE_NAME = "attendance.db"
+DATABASE_NAME = "/data/attendance.db"
 
 # --- Presentation Settings ---
 WEEKDAY_LABELS = "월 화 수 목 금 토 일"
