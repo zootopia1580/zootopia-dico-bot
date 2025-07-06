@@ -19,6 +19,7 @@ intents = discord.Intents.default()
 intents.voice_states = True
 intents.members = True
 intents.message_content = True
+
 bot = commands.Bot(command_prefix=config.BOT_PREFIX, intents=intents)
 
 # --- Global Variables ---
@@ -67,13 +68,11 @@ async def on_ready():
     await init_db()
     print(f'{bot.user}으로 로그인 성공!')
 
-    # [중요] 재시작 시 상태 복구 로직
     for guild in bot.guilds:
         voice_channel = discord.utils.get(guild.voice_channels, name=config.VOICE_CHANNEL_NAME)
         if voice_channel:
             for member in voice_channel.members:
                 if not member.bot and member.id not in active_checkins:
-                    # 봇이 꺼져있는 동안 들어온 멤버들의 출석을 지금부터 기록 시작
                     active_checkins[member.id] = datetime.now()
                     print(f"[상태 복구] {member.name}님이 이미 채널에 있어 출석을 시작합니다.")
 
@@ -87,9 +86,9 @@ async def on_voice_state_update(member, before, after):
     try:
         text_channel = discord.utils.get(member.guild.text_channels, name=config.TEXT_CHANNEL_NAME)
         if not text_channel:
-            return # 채널이 없으면 조용히 종료
+            return
     except Exception:
-        return # 예외 발생 시 조용히 종료
+        return
 
     # 사용자가 지정된 음성 채널에 '들어온' 경우
     if after.channel and after.channel.name == config.VOICE_CHANNEL_NAME:
@@ -98,7 +97,9 @@ async def on_voice_state_update(member, before, after):
             print(f"{member.name}님이 '{config.VOICE_CHANNEL_NAME}' 채널에 입장.")
 
         current_member_count = len(after.channel.members)
-        if current_member_count == 5:
+        if current_member_count == 3:
+            await text_channel.send("💻 작업방 인원 3명! 다들 캠을 켜고 집중해주세요!")
+        elif current_member_count == 5:
             await text_channel.send("🎉 작업방 인원 5명 돌파! 다들 캠을 키고 모각디를 해주세요 🔥")
         elif current_member_count == 9:
             await text_channel.send("🚀 작업방에 전원 등장! 다들 캠을 켜고 열심히 작업해주세요 ✨")
@@ -132,22 +133,31 @@ async def on_voice_state_update(member, before, after):
 # --- Bot Commands ---
 @bot.command()
 async def 현황(ctx):
-    """이번 주 출석 현황을 요약하고, 주간 목표 달성 여부를 함께 보여줍니다."""
+    """이번 주 출석 현황을 현재 음성 채널에 있는 모든 사람 기준으로 보여줍니다."""
+    # 1. 설정된 음성 채널에 있는 멤버 목록 가져오기
+    voice_channel = discord.utils.get(ctx.guild.voice_channels, name=config.VOICE_CHANNEL_NAME)
+    if not voice_channel:
+        await ctx.send(f"'{config.VOICE_CHANNEL_NAME}' 음성 채널을 찾을 수 없습니다.")
+        return
+    
+    # 봇을 제외한 현재 채널 멤버 목록
+    current_members_in_channel = [member for member in voice_channel.members if not member.bot]
+
+    if not current_members_in_channel:
+        await ctx.send(f"현재 '{config.VOICE_CHANNEL_NAME}'에 아무도 없습니다.")
+        return
+
+    # 2. 이번 주 날짜 계산 및 DB에서 데이터 가져오기
     today = datetime.now().date()
     week_start = today - timedelta(days=today.weekday())
     days = [(week_start + timedelta(days=i)).isoformat() for i in range(7)]
-    weekday_labels = config.WEEKDAY_LABELS.split()
-
+    
     async with aiosqlite.connect(config.DATABASE_NAME) as db:
-        query = """
-            SELECT user_id, check_in_date, SUM(duration) as total_duration
-            FROM attendance
-            WHERE check_in_date BETWEEN ? AND ?
-            GROUP BY user_id, check_in_date
-        """
+        query = "SELECT user_id, check_in_date, SUM(duration) as total_duration FROM attendance WHERE check_in_date BETWEEN ? AND ? GROUP BY user_id, check_in_date"
         cursor = await db.execute(query, (days[0], days[-1]))
         records = await cursor.fetchall()
 
+    # 3. DB 데이터를 사용하기 쉽게 가공
     user_stats = defaultdict(lambda: {"daily_status": {}, "pass_days": 0})
     for user_id, date_str, total_duration in records:
         stats = user_stats[user_id]
@@ -157,29 +167,24 @@ async def 현황(ctx):
         else:
             stats["daily_status"][date_str] = config.STATUS_ICONS["fail"]
 
-    if not user_stats:
-        await ctx.send("이번 주 출석 기록이 없습니다.")
-        return
-
-    response_lines = [
-        "[ 이번 주 출석 현황 ]",
-        " ".join(weekday_labels)
-    ]
+    # 4. 최종 출력 메시지 생성 (음성 채널 멤버 기준)
+    weekday_labels = config.WEEKDAY_LABELS.split()
+    response_lines = ["[ 이번 주 출석 현황 ]", " ".join(weekday_labels)]
     
-    for user_id, stats in user_stats.items():
-        daily_line = " ".join([stats["daily_status"].get(d, config.STATUS_ICONS["no_record"]) for d in days])
+    for member in current_members_in_channel:
+        stats = user_stats.get(str(member.id)) # 해당 멤버의 DB 기록 조회
         
-        weekly_result = config.WEEKLY_STATUS_MESSAGES["pass"] if stats["pass_days"] >= config.WEEKLY_GOAL_DAYS else config.WEEKLY_STATUS_MESSAGES["fail"]
-        
-        try:
-            member = await ctx.guild.fetch_member(user_id)
-            user_display = member.mention
-        except discord.NotFound:
-            user_display = f"ID:{user_id}(서버에 없음)"
+        if stats: # 기록이 있는 경우
+            daily_line = " ".join([stats["daily_status"].get(d, config.STATUS_ICONS["no_record"]) for d in days])
+            weekly_result = config.WEEKLY_STATUS_MESSAGES["pass"] if stats["pass_days"] >= config.WEEKLY_GOAL_DAYS else config.WEEKLY_STATUS_MESSAGES["fail"]
+        else: # 이번 주 기록이 전혀 없는 경우
+            daily_line = " ".join([config.STATUS_ICONS["no_record"] for _ in days])
+            weekly_result = config.WEEKLY_STATUS_MESSAGES["fail"]
 
-        response_lines.append(f"{user_display}: {daily_line}  {weekly_result}")
+        response_lines.append(f"{member.mention}: {daily_line}  {weekly_result}")
 
     await ctx.send("\n".join(response_lines))
+
 
 @bot.command()
 async def 데이터정리(ctx):
