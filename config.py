@@ -6,7 +6,7 @@ BOT_PREFIX = "!"
 # --- Channel Settings ---
 # 봇이 작동할 음성 채널과 텍스트 채널의 이름
 VOICE_CHANNEL_NAME = "고독한작업방"
-TEXT_CHANNEL_NAME = "출체크"
+TEXT_CHANNEL_NAME = "출석체크"
 
 # --- Attendance Rules ---
 # 하루 출석으로 인정될 최소 시간 (초 단위)
