@@ -1,4 +1,4 @@
-ㄴㅇ# main.py
+# main.py
 
 import os
 import discord
