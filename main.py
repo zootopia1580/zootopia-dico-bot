@@ -1,4 +1,4 @@
-# main.py
+# main.py (최종 안정화 버전)
 
 import os
 import discord
