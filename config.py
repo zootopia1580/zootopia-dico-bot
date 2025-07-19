@@ -10,11 +10,17 @@ TEXT_CHANNEL_NAME = "출석체크"
 
 # --- Attendance Rules ---
 # 하루 출석으로 인정될 최소 시간 (초 단위)
-# 4시간 = 4 * 60 * 60
-DAILY_GOAL_SECONDS = 14400
+# 2시간 = 2 * 60 * 60
+DAILY_GOAL_SECONDS = 7200
 
 # 주간 목표 달성을 위해 필요한 최소 출석일수
 WEEKLY_GOAL_DAYS = 4
+
+# --- Special User Settings ---
+# 특정 사용자를 위한 예외 규칙 (사용자 ID: 목표 시간(초))
+SPECIAL_USER_GOALS = {
+    "1339540906914746390": 14400  # 4시간
+}
 
 # --- Database Settings ---
 DATABASE_NAME = "/data/attendance.db"

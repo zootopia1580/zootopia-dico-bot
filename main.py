@@ -2,10 +2,10 @@
 
 import os
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 import aiosqlite
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time, timezone
 from collections import defaultdict
 
 # --- Local Imports ---
@@ -70,12 +70,55 @@ async def get_today_total_duration(db, user_id: str, date_str: str) -> int:
     row = await cursor.fetchone()
     return row[0] if row and row[0] is not None else 0
 
+async def generate_weekly_report(guild: discord.Guild) -> str:
+    """주간 출석 현황 리포트 문자열을 생성합니다."""
+    today = datetime.now().date()
+    week_start = today - timedelta(days=today.weekday())
+    days = [(week_start + timedelta(days=i)).isoformat() for i in range(7)]
+
+    async with aiosqlite.connect(config.DATABASE_NAME) as db:
+        query = "SELECT user_id, check_in_date, SUM(duration) as total_duration FROM attendance WHERE check_in_date BETWEEN ? AND ? GROUP BY user_id, check_in_date"
+        cursor = await db.execute(query, (days[0], days[-1]))
+        records = await cursor.fetchall()
+
+    if not records:
+        return "이번 주 출석 기록이 없습니다."
+
+    user_stats = defaultdict(lambda: {"daily_status": {}, "pass_days": 0})
+    for user_id_str, date_str, total_duration in records:
+        daily_goal = config.SPECIAL_USER_GOALS.get(user_id_str, config.DAILY_GOAL_SECONDS)
+        stats = user_stats[user_id_str]
+        if total_duration >= daily_goal:
+            stats["daily_status"][date_str] = config.STATUS_ICONS["pass"]
+            stats["pass_days"] += 1
+        else:
+            stats["daily_status"][date_str] = config.STATUS_ICONS["fail"]
+
+    weekday_labels = config.WEEKDAY_LABELS.split()
+    response_lines = ["[ 이번 주 출석 현황 ]", " ".join(weekday_labels)]
+
+    for user_id_str, stats in user_stats.items():
+        daily_line = " ".join([stats["daily_status"].get(d, config.STATUS_ICONS["no_record"]) for d in days])
+        weekly_result = config.WEEKLY_STATUS_MESSAGES["pass"] if stats["pass_days"] >= config.WEEKLY_GOAL_DAYS else config.WEEKLY_STATUS_MESSAGES["fail"]
+        
+        try:
+            member = await guild.fetch_member(int(user_id_str))
+            user_display = member.mention
+        except (discord.NotFound, ValueError):
+            user_display = f"ID:{user_id_str}(서버에 없음)"
+
+        response_lines.append(f"{user_display}: {daily_line}  {weekly_result}")
+
+    return "\n".join(response_lines)
+
 # --- Bot Events ---
 @bot.event
 async def on_ready():
-    """봇이 준비되면 DB를 초기화하고, 현재 음성 채널 상태를 확인하여 출석을 동기화합니다."""
+    """봇이 준비되면 DB를 초기화하고, 자동 리포트 작업을 시작하며, 현재 음성 채널 상태를 동기화합니다."""
     await init_db()
+    send_weekly_report.start()  # 자동 리포트 작업 시작
     print(f'{bot.user}으로 로그인 성공!')
+    print(f"자동 주간 리포트 기능이 활성화되었습니다. 매주 일요일 18:00에 전송됩니다.")
 
     for guild in bot.guilds:
         voice_channel = discord.utils.get(guild.voice_channels, name=config.VOICE_CHANNEL_NAME)
@@ -84,7 +127,6 @@ async def on_ready():
                 if not member.bot and member.id not in active_checkins:
                     active_checkins[member.id] = datetime.now()
                     print(f"[상태 복구] {member.name}님이 이미 채널에 있어 출석을 시작합니다.")
-
 
 @bot.event
 async def on_voice_state_update(member, before, after):
@@ -157,44 +199,8 @@ async def on_voice_state_update(member, before, after):
 @bot.command()
 async def 현황(ctx):
     """이번 주 출석 기록이 있는 모든 사용자의 현황을 보여줍니다."""
-    today = datetime.now().date()
-    week_start = today - timedelta(days=today.weekday())
-    days = [(week_start + timedelta(days=i)).isoformat() for i in range(7)]
-    
-    async with aiosqlite.connect(config.DATABASE_NAME) as db:
-        query = "SELECT user_id, check_in_date, SUM(duration) as total_duration FROM attendance WHERE check_in_date BETWEEN ? AND ? GROUP BY user_id, check_in_date"
-        cursor = await db.execute(query, (days[0], days[-1]))
-        records = await cursor.fetchall()
-
-    if not records:
-        await ctx.send("이번 주 출석 기록이 없습니다.")
-        return
-
-    user_stats = defaultdict(lambda: {"daily_status": {}, "pass_days": 0})
-    for user_id, date_str, total_duration in records:
-        stats = user_stats[user_id]
-        if total_duration >= config.DAILY_GOAL_SECONDS:
-            stats["daily_status"][date_str] = config.STATUS_ICONS["pass"]
-            stats["pass_days"] += 1
-        else:
-            stats["daily_status"][date_str] = config.STATUS_ICONS["fail"]
-
-    weekday_labels = config.WEEKDAY_LABELS.split()
-    response_lines = ["[ 이번 주 출석 현황 ]", " ".join(weekday_labels)]
-    
-    for user_id, stats in user_stats.items():
-        daily_line = " ".join([stats["daily_status"].get(d, config.STATUS_ICONS["no_record"]) for d in days])
-        weekly_result = config.WEEKLY_STATUS_MESSAGES["pass"] if stats["pass_days"] >= config.WEEKLY_GOAL_DAYS else config.WEEKLY_STATUS_MESSAGES["fail"]
-        
-        try:
-            member = await ctx.guild.fetch_member(user_id)
-            user_display = member.mention
-        except discord.NotFound:
-            user_display = f"ID:{user_id}(서버에 없음)"
-
-        response_lines.append(f"{user_display}: {daily_line}  {weekly_result}")
-
-    await ctx.send("\n".join(response_lines))
+    report_message = await generate_weekly_report(ctx.guild)
+    await ctx.send(report_message)
 
 
 @bot.command()
@@ -205,6 +211,25 @@ async def 데이터정리(ctx):
         await db.execute("DELETE FROM attendance WHERE check_in_date < ?", (seven_days_ago,))
         await db.commit()
     await ctx.send("7일 이전의 출석 데이터가 정리되었습니다!")
+
+# --- Scheduled Tasks ---
+# 한국 시간(KST, UTC+9) 기준 매일 저녁 6시(18:00)에 실행되도록 설정
+KST = timezone(timedelta(hours=9))
+report_time = time(hour=18, minute=0, tzinfo=KST)
+
+@tasks.loop(time=report_time)
+async def send_weekly_report():
+    """매주 일요일에 주간 리포트를 자동으로 전송합니다."""
+    # 루프가 실행되는 오늘이 일요일(weekday() == 6)인지 확인
+    if datetime.now(KST).weekday() == 6:
+        print(f"[{datetime.now(KST)}] 정기 주간 리포트를 전송합니다.")
+        for guild in bot.guilds:
+            channel = discord.utils.get(guild.text_channels, name=config.TEXT_CHANNEL_NAME)
+            if channel:
+                report_message = await generate_weekly_report(guild)
+                await channel.send(report_message)
+            else:
+                print(f"'{guild.name}' 서버에서 '{config.TEXT_CHANNEL_NAME}' 채널을 찾을 수 없습니다.")
 
 # --- Run Bot ---
 if __name__ == "__main__":
