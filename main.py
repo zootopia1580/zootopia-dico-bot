@@ -101,7 +101,7 @@ async def generate_weekly_status_line(db, user_id: str, dates: list):
 
 async def build_weekly_mid_report(guild: discord.Guild, report_date: datetime.date):
     week_start = report_date - timedelta(days=report_date.weekday())
-    dates = [week_start + timedelta(days=i) for i in range(4)] # 자동화 리포트는 월-목 고정
+    dates = [week_start + timedelta(days=i) for i in range(4)]
     header = config.MESSAGE_HEADINGS["weekly_mid_check"].format(month=report_date.month, week=get_week_of_month(report_date))
     body = ["주말까지 이틀 남았어요! 현재까지의 출석 현황입니다.", "`월 화 수 목`"]
     async with aiosqlite.connect(config.DATABASE_NAME) as db:
@@ -115,7 +115,6 @@ async def build_weekly_mid_report(guild: discord.Guild, report_date: datetime.da
     return "\n".join([header] + body)
     
 async def build_manual_weekly_check_report(guild: discord.Guild, report_date: datetime.date):
-    """!현황 명령어를 위한 동적 리포트 생성"""
     week_start = report_date - timedelta(days=report_date.weekday())
     num_days_to_show = report_date.weekday() + 1
     dates = [week_start + timedelta(days=i) for i in range(num_days_to_show)]
@@ -191,7 +190,7 @@ async def on_voice_state_update(member, before, after):
         if member.id not in active_checkins:
             active_checkins[member.id] = datetime.now(KST)
             print(f"{member.display_name}님이 '{config.VOICE_CHANNEL_NAME}' 채널에 입장.")
-            await text_channel.send(f"{member.mention}님, productive time! 🔥")
+            await text_channel.send(f"{member.mention}님, 작업 시작! 🔥")
     elif before.channel and before.channel.name == config.VOICE_CHANNEL_NAME:
         check_in_time = active_checkins.pop(member.id, None)
         if not check_in_time: return
@@ -230,7 +229,7 @@ async def monthly_check_command(ctx, month: int = None):
         return
 
     await ctx.send(f"**{year}년 {month}월** 최종 결산 내역을 불러오는 중... 🏆")
-    report_message = await build_monthly_final_report(ctx.guild, year, month)
+    report_message = await build_monthly_final_report(guild, year, month)
     await ctx.send(report_message)
 
 # --- Scheduled Tasks ---
