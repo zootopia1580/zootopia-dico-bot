@@ -103,14 +103,14 @@ async def build_weekly_mid_report(guild: discord.Guild, report_date: datetime.da
     week_start = report_date - timedelta(days=report_date.weekday())
     dates = [week_start + timedelta(days=i) for i in range(4)] # 자동화 리포트는 월-목 고정
     header = config.MESSAGE_HEADINGS["weekly_mid_check"].format(month=report_date.month, week=get_week_of_month(report_date))
-    body = ["주말까지 이틀 남았어요! 현재까지의 출석 현황입니다.", "`          월 화 수 목`"]
+    body = ["주말까지 이틀 남았어요! 현재까지의 출석 현황입니다.", "`월 화 수 목`"]
     async with aiosqlite.connect(config.DATABASE_NAME) as db:
         users = await get_all_users_for_month(db, report_date.year, report_date.month)
         for user_id in users:
             member = guild.get_member(int(user_id))
             if member:
                 status_line, _ = await generate_weekly_status_line(db, user_id, dates)
-                body.append(f"`{member.display_name:<8}: {status_line}`")
+                body.append(f"`{status_line}` {member.mention}")
     body.append(f"\n> (✅: 달성, ⚠️: 모자람, ❌: 안 들어옴)\n\n아직 시간이 충분해요. 모두 목표를 향해 달려봐요! 🚀")
     return "\n".join([header] + body)
     
@@ -123,17 +123,17 @@ async def build_manual_weekly_check_report(guild: discord.Guild, report_date: da
     
     header = f"[📢 현재 주간 현황] {report_date.month}월 {get_week_of_month(report_date)}주차"
     labels_line = " ".join(weekday_labels[:num_days_to_show])
-    body = [f"오늘까지의 출석 현황입니다.", f"`          {labels_line}`"]
+    body = [f"오늘까지의 출석 현황입니다.", f"`{labels_line}`"]
     
     async with aiosqlite.connect(config.DATABASE_NAME) as db:
         users = await get_all_users_for_month(db, report_date.year, report_date.month)
         if not users:
-             return "이번 달 출석 기록이 아직 없습니다."
+             return "아직 이번 달 활동 기록이 없네요. 지금 바로 시작해보세요! 💪"
         for user_id in users:
             member = guild.get_member(int(user_id))
             if member:
                 status_line, _ = await generate_weekly_status_line(db, user_id, dates)
-                body.append(f"`{member.display_name:<8}: {status_line}`")
+                body.append(f"`{status_line}` {member.mention}")
     
     body.append(f"\n> (✅: 달성, ⚠️: 모자람, ❌: 안 들어옴)")
     return "\n".join([header] + body)
@@ -144,7 +144,7 @@ async def build_monthly_final_report(guild: discord.Guild, year: int, month: int
     async with aiosqlite.connect(config.DATABASE_NAME) as db:
         users = await get_all_users_for_month(db, year, month)
         if not users:
-            return f"{year}년 {month}월의 출석 기록이 없습니다."
+            return f"해당 월에는 출석 기록이 존재하지 않습니다."
             
         for user_id in users:
             total_successful_weeks = 0
@@ -191,7 +191,7 @@ async def on_voice_state_update(member, before, after):
         if member.id not in active_checkins:
             active_checkins[member.id] = datetime.now(KST)
             print(f"{member.display_name}님이 '{config.VOICE_CHANNEL_NAME}' 채널에 입장.")
-            await text_channel.send(f"{member.mention}님, 작업 시작! 🔥")
+            await text_channel.send(f"{member.mention}님, productive time! 🔥")
     elif before.channel and before.channel.name == config.VOICE_CHANNEL_NAME:
         check_in_time = active_checkins.pop(member.id, None)
         if not check_in_time: return
@@ -206,13 +206,13 @@ async def on_voice_state_update(member, before, after):
             total_seconds_today = await get_today_total_duration(db, str(member.id), check_out_time.date().isoformat())
             hours, remainder = divmod(total_seconds_today, 3600)
             minutes, _ = divmod(remainder, 60)
-            await text_channel.send(f"{member.mention}님, 오늘 누적 작업시간은 {int(hours):02d}시간 {int(minutes):02d}분입니다. 👏")
+            await text_channel.send(f"{member.mention}님 수고하셨습니다! 👏\n> 오늘의 총 작업 시간: {int(hours):02d}시간 {int(minutes):02d}분")
 
 # --- Bot Commands ---
 @bot.command(name="현황")
 async def weekly_check_command(ctx):
     """현재 요일까지의 주간 출석 현황을 즉시 확인합니다."""
-    await ctx.send("이번 주 현황을 조회합니다. 잠시만 기다려주세요...")
+    await ctx.send("이번 주 출석 현황을 집계 중입니다... 🗓️")
     report_message = await build_manual_weekly_check_report(ctx.guild, datetime.now(KST).date())
     await ctx.send(report_message)
 
@@ -229,7 +229,7 @@ async def monthly_check_command(ctx, month: int = None):
         await ctx.send("올바른 월(1-12)을 입력해주세요.")
         return
 
-    await ctx.send(f"**{year}년 {month}월** 최종 결산 내역을 조회합니다. 잠시만 기다려주세요...")
+    await ctx.send(f"**{year}년 {month}월** 최종 결산 내역을 불러오는 중... 🏆")
     report_message = await build_monthly_final_report(ctx.guild, year, month)
     await ctx.send(report_message)
 
@@ -258,7 +258,7 @@ async def main_scheduler():
         week_start = last_sunday - timedelta(days=6)
         dates = [week_start + timedelta(days=i) for i in range(7)]
         header = config.MESSAGE_HEADINGS["weekly_final"].format(month=last_sunday.month, week=get_week_of_month(last_sunday))
-        body = ["지난주 출석 결과가 최종 확정되었습니다.", "`          월 화 수 목 금 토 일`"]
+        body = ["지난 한 주 모두 고생 많으셨습니다. 최종 출석 결과입니다.", "`월 화 수 목 금 토 일`"]
         async with aiosqlite.connect(config.DATABASE_NAME) as db:
             users = await get_all_users_for_month(db, last_sunday.year, last_sunday.month)
             successful_weeks_by_user = defaultdict(int)
@@ -273,13 +273,13 @@ async def main_scheduler():
                 if member:
                     status_line, pass_days = await generate_weekly_status_line(db, user_id, dates)
                     result = "달성! 🎉" if pass_days >= config.WEEKLY_GOAL_DAYS else "미달성 😥"
-                    body.append(f"`{member.display_name:<8}: {status_line}`  **{result}** (월간: {successful_weeks_by_user.get(user_id, 0)}주 성공)")
+                    body.append(f"`{status_line}` {member.mention}  **{result}** (월간: {successful_weeks_by_user.get(user_id, 0)}주 성공)")
         body.append("\n새로운 한 주도 함께 파이팅입니다!")
         await channel.send("\n".join([header] + body))
         if get_week_of_month(last_sunday) == 3:
             print(f"[{now}] 스케줄러: 월간 중간 결산 실행")
             header = config.MESSAGE_HEADINGS["monthly_mid_check"].format(month=last_sunday.month)
-            mid_body = [f"이제 마지막 한 주만 남았어요!", f"(면제 조건: 총 {config.MONTHLY_GOAL_WEEKS}주 이상 성공)"]
+            mid_body = [f"벌써 마지막 주네요! {last_sunday.month}월 사용료 면제 현황을 알려드립니다."]
             for user_id in users:
                 weeks = successful_weeks_by_user.get(user_id, 0)
                 member = guild.get_member(int(user_id))
