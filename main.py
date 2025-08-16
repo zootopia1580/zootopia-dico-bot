@@ -59,7 +59,8 @@ def split_session_by_day(check_in: datetime, check_out: datetime):
     sessions = []
     current_time = check_in
     while current_time.date() < check_out.date():
-        end_of_day = datetime.combine(current_time.date(), time(23, 59, 59))
+        # [FIXED] 23:59:59 시간을 만들 때, 기존 시간의 시간대 정보(tzinfo)를 함께 넘겨줍니다.
+        end_of_day = datetime.combine(current_time.date(), time(23, 59, 59), tzinfo=current_time.tzinfo)
         sessions.append({
             "check_in": current_time.isoformat(), "check_out": end_of_day.isoformat(),
             "duration": (end_of_day - current_time).total_seconds()})
@@ -248,7 +249,7 @@ async def monthly_check_command(ctx, month: int = None):
         return
 
     await ctx.send(f"**{year}년 {month}월** 최종 결산 내역을 불러오는 중... 🏆")
-    report_message = await build_monthly_final_report(guild, year, month)
+    report_message = await build_monthly_final_report(ctx.guild, year, month)
     await ctx.send(report_message)
 
 # --- Scheduled Tasks ---
@@ -302,7 +303,7 @@ async def main_scheduler():
                 if member:
                     if weeks >= config.MONTHLY_GOAL_WEEKS: status = "사용료 면제 확정! 🥳"
                     elif weeks == config.MONTHLY_GOAL_WEEKS - 1: status = "마지막 주 목표 달성 시 면제 가능! 🔥"
-                    else: status = "면제는 어려워졌지만, 남은 한 주도 파이팅! 💪" # <-- 이 부분이 수정되었습니다.
+                    else: status = "면제는 어려워졌지만, 남은 한 주도 파이팅! 💪"
                     mid_body.append(f"{member.mention}: 현재 **{weeks}주** 성공 - **{status}**")
             await channel.send("\n".join([header] + mid_body))
 
