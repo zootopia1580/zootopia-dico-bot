@@ -25,7 +25,6 @@ intents.message_content = True
 bot = commands.Bot(command_prefix=config.BOT_PREFIX, intents=intents)
 
 # --- Global State ---
-active_checkins = {}
 last_task_run = defaultdict(lambda: None)
 
 # --- Database Functions ---
@@ -39,6 +38,12 @@ async def init_db():
                 check_out TEXT NOT NULL,
                 duration INTEGER NOT NULL,
                 check_in_date TEXT NOT NULL
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS active_sessions (
+                user_id TEXT PRIMARY KEY NOT NULL,
+                check_in TEXT NOT NULL
             )
         """)
         await db.commit()
@@ -144,7 +149,6 @@ async def build_monthly_final_report(guild: discord.Guild, year: int, month: int
         users = await get_all_users_for_month(db, year, month)
         if not users:
             return f"해당 월에는 출석 기록이 존재하지 않습니다."
-            
         for user_id in users:
             total_successful_weeks = 0
             for week in calendar.monthcalendar(year, month):
@@ -173,51 +177,66 @@ async def on_ready():
     main_scheduler.start()
     print(f'{bot.user}으로 로그인 성공!')
     print("메인 스케줄러가 시작되었습니다.")
-    for guild in bot.guilds:
-        voice_channel = discord.utils.get(guild.voice_channels, name=config.VOICE_CHANNEL_NAME)
-        if voice_channel:
-            for member in voice_channel.members:
-                if not member.bot and member.id not in active_checkins:
-                    active_checkins[member.id] = datetime.now(KST)
-                    print(f"[상태 복구] {member.display_name}님이 이미 채널에 있어 출석을 시작합니다.")
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    if member.bot or before.channel == after.channel: return
+    if member.bot or before.channel == after.channel:
+        return
+
     text_channel = discord.utils.get(member.guild.text_channels, name=config.TEXT_CHANNEL_NAME)
-    if not text_channel: return
-    if after.channel and after.channel.name == config.VOICE_CHANNEL_NAME:
-        if member.id not in active_checkins:
-            active_checkins[member.id] = datetime.now(KST)
-            print(f"{member.display_name}님이 '{config.VOICE_CHANNEL_NAME}' 채널에 입장.")
-            await text_channel.send(f"{member.mention}님, 작업 시작! 🔥")
-    elif before.channel and before.channel.name == config.VOICE_CHANNEL_NAME:
-        check_in_time = active_checkins.pop(member.id, None)
-        if not check_in_time: return
-        check_out_time = datetime.now(KST)
-        print(f"{member.display_name}님이 '{config.VOICE_CHANNEL_NAME}' 채널에서 퇴장.")
-        async with aiosqlite.connect(config.DATABASE_NAME) as db:
-            sessions_to_insert = split_session_by_day(check_in_time, check_out_time)
-            for session in sessions_to_insert:
-                await db.execute("INSERT INTO attendance (user_id, check_in, check_out, duration, check_in_date) VALUES (?, ?, ?, ?, ?)",
-                                 (str(member.id), session["check_in"], session["check_out"], session["duration"], datetime.fromisoformat(session["check_in"]).date().isoformat()))
-            await db.commit()
-            total_seconds_today = await get_today_total_duration(db, str(member.id), check_out_time.date().isoformat())
-            hours, remainder = divmod(total_seconds_today, 3600)
-            minutes, _ = divmod(remainder, 60)
-            await text_channel.send(f"{member.mention}님 수고하셨습니다! 👏\n> 오늘의 총 작업 시간: {int(hours):02d}시간 {int(minutes):02d}분")
+    if not text_channel:
+        return
+
+    async with aiosqlite.connect(config.DATABASE_NAME) as db:
+        if after.channel and after.channel.name == config.VOICE_CHANNEL_NAME:
+            cursor = await db.execute("SELECT check_in FROM active_sessions WHERE user_id = ?", (str(member.id),))
+            is_already_checked_in = await cursor.fetchone()
+            if not is_already_checked_in:
+                check_in_time = datetime.now(KST)
+                await db.execute("INSERT INTO active_sessions (user_id, check_in) VALUES (?, ?)", (str(member.id), check_in_time.isoformat()))
+                await db.commit()
+                print(f"{member.display_name}님이 '{config.VOICE_CHANNEL_NAME}' 채널에 입장. DB에 기록.")
+                await text_channel.send(f"{member.mention}님, 작업 시작! 🔥")
+
+        elif before.channel and before.channel.name == config.VOICE_CHANNEL_NAME:
+            cursor = await db.execute("SELECT check_in FROM active_sessions WHERE user_id = ?", (str(member.id),))
+            row = await cursor.fetchone()
+            if row:
+                check_in_time = datetime.fromisoformat(row[0])
+                check_out_time = datetime.now(KST)
+                
+                await db.execute("DELETE FROM active_sessions WHERE user_id = ?", (str(member.id),))
+
+                sessions_to_insert = split_session_by_day(check_in_time, check_out_time)
+                for session in sessions_to_insert:
+                    await db.execute("INSERT INTO attendance (user_id, check_in, check_out, duration, check_in_date) VALUES (?, ?, ?, ?, ?)",
+                                     (str(member.id), session["check_in"], session["check_out"], session["duration"], datetime.fromisoformat(session["check_in"]).date().isoformat()))
+                
+                await db.commit()
+                print(f"{member.display_name}님이 '{config.VOICE_CHANNEL_NAME}' 채널에서 퇴장. DB 업데이트.")
+
+                involved_dates = sorted(list(set([datetime.fromisoformat(s["check_in"]).date() for s in sessions_to_insert])))
+
+                time_report_parts = []
+                for report_date in involved_dates:
+                    total_seconds = await get_today_total_duration(db, str(member.id), report_date.isoformat())
+                    hours, remainder = divmod(total_seconds, 3600)
+                    minutes, _ = divmod(remainder, 60)
+                    time_report_parts.append(f"> {report_date.day}일 총 작업 시간: {int(hours):02d}시간 {int(minutes):02d}분")
+                
+                time_report_message = "\n".join(time_report_parts)
+                
+                await text_channel.send(f"{member.mention}님 수고하셨습니다! 👏\n{time_report_message}")
 
 # --- Bot Commands ---
 @bot.command(name="현황")
 async def weekly_check_command(ctx):
-    """현재 요일까지의 주간 출석 현황을 즉시 확인합니다."""
     await ctx.send("이번 주 출석 현황을 집계 중입니다... 🗓️")
     report_message = await build_manual_weekly_check_report(ctx.guild, datetime.now(KST).date())
     await ctx.send(report_message)
 
 @bot.command(name="월간결산")
 async def monthly_check_command(ctx, month: int = None):
-    """특정 월의 최종 결산 내역을 확인합니다. (데이터 삭제 없음)"""
     now = datetime.now(KST)
     year = now.year
     if month is None:
@@ -243,13 +262,11 @@ async def main_scheduler():
     channel = discord.utils.get(guild.text_channels, name=config.TEXT_CHANNEL_NAME)
     if not channel: return
 
-    # 주간 중간 점검 (목 18:00)
     if now.weekday() == 3 and now.hour == 18 and last_task_run["weekly_mid"] != today_str:
         last_task_run["weekly_mid"] = today_str
         print(f"[{now}] 스케줄러: 주간 중간 점검 실행")
         await channel.send(await build_weekly_mid_report(guild, now.date()))
 
-    # 주간 최종/월간 중간 결산 (월 00:05)
     if now.weekday() == 0 and now.hour == 0 and now.minute >= 5 and last_task_run["weekly_final"] != today_str:
         last_task_run["weekly_final"] = today_str
         print(f"[{now}] 스케줄러: 주간 최종 결산 실행")
@@ -285,11 +302,10 @@ async def main_scheduler():
                 if member:
                     if weeks >= config.MONTHLY_GOAL_WEEKS: status = "사용료 면제 확정! 🥳"
                     elif weeks == config.MONTHLY_GOAL_WEEKS - 1: status = "마지막 주 목표 달성 시 면제 가능! 🔥"
-                    else: status = "이번 달 면제는 어렵게 되었어요. 😥"
+                    else: status = "면제는 어려워졌지만, 남은 한 주도 파이팅! 💪" # <-- 이 부분이 수정되었습니다.
                     mid_body.append(f"{member.mention}: 현재 **{weeks}주** 성공 - **{status}**")
             await channel.send("\n".join([header] + mid_body))
 
-    # 월간 최종 정산 및 데이터 삭제 (매월 1일 01:00)
     if now.day == 1 and now.hour == 1 and last_task_run["monthly_final"] != today_str:
         last_task_run["monthly_final"] = today_str
         print(f"[{now}] 스케줄러: 월간 최종 정산 및 데이터 삭제 실행")
