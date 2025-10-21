@@ -180,6 +180,8 @@ async def on_ready():
 
 @bot.event
 async def on_voice_state_update(member, before, after):
+    print(f"[DEBUG] on_voice_state_update 이벤트 발생: {member.name} 님이 채널을 변경했습니다.") # <-- 음성 채널 디버깅 로그
+
     if member.bot or before.channel == after.channel:
         return
 
