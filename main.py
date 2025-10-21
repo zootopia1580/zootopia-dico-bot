@@ -228,36 +228,45 @@ async def on_voice_state_update(member, before, after):
                 
                 await text_channel.send(f"{member.mention}님 수고하셨습니다! 👏\n{time_report_message}")
 
-# --- [NEW] 음성 채널 상태 메시지 변경 감지 이벤트 ---
+# --- [DEBUG] 음성 채널 상태 메시지 변경 감지 이벤트 (디버깅용) ---
 @bot.event
 async def on_guild_channel_update(before, after):
-    # 1. 음성 채널인지, 그리고 우리가 감시할 채널인지 확인합니다.
+    print("1. on_guild_channel_update 이벤트 발생") # <-- 디버깅 메시지 1
+
+    # 음성 채널인지, 그리고 우리가 감시할 채널인지 확인
     if not isinstance(after, discord.VoiceChannel) or after.name != config.VOICE_CHANNEL_NAME:
         return
 
-    # 2. 채널 '상태'가 비어있지 않은 새 값으로 변경되었는지 확인합니다.
+    print("2. 올바른 음성 채널 업데이트 감지") # <-- 디버깅 메시지 2
+
+    # 채널 '상태'가 비어있지 않은 새 값으로 변경되었는지 확인
     if before.status == after.status or not after.status:
         return
 
-    # 3. 텍스트 채널을 찾습니다.
+    print(f"3. 상태 메시지 변경 확인: '{before.status}' -> '{after.status}'") # <-- 디버깅 메시지 3
+
+    # 텍스트 채널 찾기
     text_channel = discord.utils.get(after.guild.text_channels, name=config.TEXT_CHANNEL_NAME)
     if not text_channel:
+        print("오류: 텍스트 채널을 찾을 수 없습니다.")
         return
-
-    # 4. '감사 로그'를 확인하여 누가 상태를 변경했는지 찾습니다. (권한 필요!)
+    
+    print("4. 감사 로그 읽기 시도...") # <-- 디버깅 메시지 4
     try:
-        async for entry in after.guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_update):
+        # 감사 로그를 최근 5개까지 확인하여 정확도를 높입니다.
+        async for entry in after.guild.audit_logs(limit=5, action=discord.AuditLogAction.channel_update):
+            print(f"5. 감사 로그 확인 중: [대상:{entry.target.name}] [유저:{entry.user.name}]") # <-- 디버깅 메시지 5
             if entry.target.id == after.id and entry.user:
-                # 5. 멋진 메시지를 만듭니다.
-                # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
-                message = f"{entry.user.mention} 님이 '**{after.status}**' 작업방을 오픈했어요! 🎉" # <-- 이 부분이 방금 수정한 메시지입니다.
-                # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+                print(f"6. 작업자 찾음: {entry.user.name}") # <-- 디버깅 메시지 6
+                message = f"{entry.user.mention} 님이 '**{after.status}**' 작업방을 오픈했어요! 🎉"
                 await text_channel.send(message)
-                break # 해당 로그를 찾았으므로 루프 종료
-                
+                print("7. 메시지 전송 성공!") # <-- 디버깅 메시지 7
+                return # 메시지를 보냈으므로 함수 종료
     except discord.Forbidden:
-        print("오류: 봇에게 '감사 로그 보기' 권한이 없습니다. 이 기능을 사용하려면 권한을 추가해주세요.")
+        print("오류: '감사 로그 보기' 권한이 없어 감사 로그에 접근할 수 없습니다.")
         await text_channel.send(f"음성 채널 상태가 '**{after.status}**'(으)로 변경되었어요! (권한 부족으로 누가 바꿨는지는 알 수 없네요 😥)")
+    except Exception as e:
+        print(f"알 수 없는 오류 발생: {e}")
 
 # --- Bot Commands ---
 @bot.command(name="현황")
