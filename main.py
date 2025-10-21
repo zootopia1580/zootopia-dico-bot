@@ -59,7 +59,6 @@ def split_session_by_day(check_in: datetime, check_out: datetime):
     sessions = []
     current_time = check_in
     while current_time.date() < check_out.date():
-        # [FIXED] 23:59:59 시간을 만들 때, 기존 시간의 시간대 정보(tzinfo)를 함께 넘겨줍니다.
         end_of_day = datetime.combine(current_time.date(), time(23, 59, 59), tzinfo=current_time.tzinfo)
         sessions.append({
             "check_in": current_time.isoformat(), "check_out": end_of_day.isoformat(),
@@ -133,7 +132,7 @@ async def build_manual_weekly_check_report(guild: discord.Guild, report_date: da
     async with aiosqlite.connect(config.DATABASE_NAME) as db:
         users = await get_all_users_for_month(db, report_date.year, report_date.month)
         if not users:
-             return "아직 이번 달 활동 기록이 없네요. 지금 바로 시작해보세요! 💪"
+            return "아직 이번 달 활동 기록이 없네요. 지금 바로 시작해보세요! 💪"
         for user_id in users:
             member = guild.get_member(int(user_id))
             if member:
@@ -229,6 +228,37 @@ async def on_voice_state_update(member, before, after):
                 
                 await text_channel.send(f"{member.mention}님 수고하셨습니다! 👏\n{time_report_message}")
 
+# --- [NEW] 음성 채널 상태 메시지 변경 감지 이벤트 ---
+@bot.event
+async def on_guild_channel_update(before, after):
+    # 1. 음성 채널인지, 그리고 우리가 감시할 채널인지 확인합니다.
+    if not isinstance(after, discord.VoiceChannel) or after.name != config.VOICE_CHANNEL_NAME:
+        return
+
+    # 2. 채널 '상태'가 비어있지 않은 새 값으로 변경되었는지 확인합니다.
+    if before.status == after.status or not after.status:
+        return
+
+    # 3. 텍스트 채널을 찾습니다.
+    text_channel = discord.utils.get(after.guild.text_channels, name=config.TEXT_CHANNEL_NAME)
+    if not text_channel:
+        return
+
+    # 4. '감사 로그'를 확인하여 누가 상태를 변경했는지 찾습니다. (권한 필요!)
+    try:
+        async for entry in after.guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_update):
+            if entry.target.id == after.id and entry.user:
+                # 5. 멋진 메시지를 만듭니다.
+                # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+                message = f"{entry.user.mention} 님이 '**{after.status}**' 작업방을 오픈했어요! 🎉" # <-- 이 부분이 방금 수정한 메시지입니다.
+                # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+                await text_channel.send(message)
+                break # 해당 로그를 찾았으므로 루프 종료
+                
+    except discord.Forbidden:
+        print("오류: 봇에게 '감사 로그 보기' 권한이 없습니다. 이 기능을 사용하려면 권한을 추가해주세요.")
+        await text_channel.send(f"음성 채널 상태가 '**{after.status}**'(으)로 변경되었어요! (권한 부족으로 누가 바꿨는지는 알 수 없네요 😥)")
+
 # --- Bot Commands ---
 @bot.command(name="현황")
 async def weekly_check_command(ctx):
@@ -290,7 +320,7 @@ async def main_scheduler():
                 if member:
                     status_line, pass_days = await generate_weekly_status_line(db, user_id, dates)
                     result = "달성! 🎉" if pass_days >= config.WEEKLY_GOAL_DAYS else "미달성 😥"
-                    body.append(f"`{status_line}` {member.mention}  **{result}** (월간: {successful_weeks_by_user.get(user_id, 0)}주 성공)")
+                    body.append(f"`{status_line}` {member.mention}   **{result}** (월간: {successful_weeks_by_user.get(user_id, 0)}주 성공)")
         body.append("\n새로운 한 주도 함께 파이팅입니다!")
         await channel.send("\n".join([header] + body))
         if get_week_of_month(last_sunday) == 3:
