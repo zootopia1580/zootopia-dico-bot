@@ -7,7 +7,7 @@
 - 지정된 음성 채널의 사용자 입장/퇴장 시간을 기록하여 총 활동 시간을 계산합니다.
 - '/data/attendance.db' SQLite 데이터베이스에 모든 기록을 저장합니다.
 - 주간/월간 목표 달성 여부를 자동으로 정산하고 보고합니다.
-- 사용자가 음성 채널의 '상태'를 설정하면, 이를 감지하여 다른 사용자들에게 알립니다.
+- 봇에게 '!집중 [내용]' DM을 보내 작업 시작을 채널에 알립니다.
 
 [배포 환경]
 - 이 봇은 Render의 Background Worker 서비스를 통해 배포됩니다.
@@ -24,7 +24,7 @@ from collections import defaultdict
 import calendar
 
 # 이 메시지는 Render 배포 로그에서 최신 코드가 적용되었는지 확인하기 위한 표식입니다.
-print("★★★★★ 최종 버전 봇 코드 실행 시작! ★★★★★★")
+print("★★★★★ 최종 버전 봇 코드 실행 시작! (DM 기능 탑재) ★★★★★★")
 
 # --- Local Imports ---
 import config
@@ -32,12 +32,13 @@ import config
 # --- Bot Setup ---
 load_dotenv()
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-KST = timezone(timedelta(hours=9)) # 한국 시간대 설정
+KST = timezone(timedelta(hours=9))
 
 intents = discord.Intents.default()
 intents.voice_states = True
 intents.members = True
 intents.message_content = True
+intents.dm_messages = True
 
 bot = commands.Bot(command_prefix=config.BOT_PREFIX, intents=intents)
 
@@ -46,9 +47,6 @@ last_task_run = defaultdict(lambda: None)
 
 # --- Database Functions ---
 async def init_db():
-    """
-    의도: 봇 실행 시 데이터베이스와 필요한 테이블이 준비되도록 합니다.
-    """
     async with aiosqlite.connect(config.DATABASE_NAME) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS attendance (
@@ -70,18 +68,12 @@ async def init_db():
 
 # --- Helper Functions ---
 def get_week_of_month(dt: datetime.date) -> int:
-    """
-    의도: 특정 날짜가 그 달의 몇 주차에 해당하는지 계산합니다.
-    """
     first_day = dt.replace(day=1)
     dom = dt.day
     adjusted_dom = dom + first_day.weekday()
     return (adjusted_dom - 1) // 7 + 1
 
 def split_session_by_day(check_in: datetime, check_out: datetime):
-    """
-    의도: 사용자가 자정을 넘어 채널에 머물렀을 경우, 날짜별로 작업 시간을 정확히 나누기 위함입니다.
-    """
     sessions = []
     current_time = check_in
     while current_time.date() < check_out.date():
@@ -96,17 +88,11 @@ def split_session_by_day(check_in: datetime, check_out: datetime):
     return sessions
 
 async def get_today_total_duration(db, user_id: str, date_str: str) -> int:
-    """
-    의도: 특정 사용자의 특정 날짜 총 작업 시간을 초 단위로 가져옵니다.
-    """
     cursor = await db.execute("SELECT SUM(duration) FROM attendance WHERE user_id = ? AND check_in_date = ?", (user_id, date_str))
     row = await cursor.fetchone()
     return row[0] if row and row[0] is not None else 0
 
 async def get_all_users_for_month(db, year: int, month: int):
-    """
-    의도: 월간 리포트 생성 시, 해당 월에 한 번이라도 참여한 모든 사용자를 조회하기 위함입니다.
-    """
     start_date = f"{year}-{month:02d}-01"
     end_date = f"{year}-{month:02d}-{calendar.monthrange(year, month)[1]}"
     cursor = await db.execute("SELECT DISTINCT user_id FROM attendance WHERE check_in_date BETWEEN ? AND ?", (start_date, end_date))
@@ -114,9 +100,6 @@ async def get_all_users_for_month(db, year: int, month: int):
     return [row[0] for row in rows]
 
 async def get_daily_durations(db, user_id: str, dates: list) -> dict:
-    """
-    의도: 주간 리포트 생성 시, 특정 기간 동안의 일별 작업 시간을 한번에 효율적으로 조회하기 위함입니다.
-    """
     if not dates: return {}
     date_placeholders = ",".join("?" for d in dates)
     query = f"SELECT check_in_date, SUM(duration) FROM attendance WHERE user_id = ? AND check_in_date IN ({date_placeholders}) GROUP BY check_in_date"
@@ -127,9 +110,6 @@ async def get_daily_durations(db, user_id: str, dates: list) -> dict:
 
 # --- Report Generation Logic ---
 async def generate_weekly_status_line(db, user_id: str, dates: list):
-    """
-    의도: 주간 리포트에서 각 요일별 목표 달성 여부를 아이콘으로 표시하기 위함입니다.
-    """
     daily_durations = await get_daily_durations(db, user_id, dates)
     daily_goal = config.SPECIAL_USER_GOALS.get(user_id, config.DAILY_GOAL_SECONDS)
     line, pass_days = [], 0
@@ -211,9 +191,6 @@ async def build_monthly_final_report(guild: discord.Guild, year: int, month: int
 # --- Bot Events ---
 @bot.event
 async def on_ready():
-    """
-    의도: 봇이 성공적으로 디스코드에 로그인하고 준비되었을 때 초기 작업을 수행합니다.
-    """
     await init_db()
     main_scheduler.start()
     print(f'{bot.user}으로 로그인 성공!')
@@ -222,7 +199,7 @@ async def on_ready():
 @bot.event
 async def on_voice_state_update(member, before, after):
     """
-    의도: 사용자의 음성 채널 활동(입장, 퇴장, 상태 변경)을 모두 감지하고 처리합니다.
+    의도: 사용자의 음성 채널 '입장'과 '퇴장'만을 감지하여 출석을 기록합니다.
     """
     if member.bot:
         return
@@ -230,25 +207,15 @@ async def on_voice_state_update(member, before, after):
     text_channel = discord.utils.get(member.guild.text_channels, name=config.TEXT_CHANNEL_NAME)
     if not text_channel:
         return
-
-    # --- 시나리오 1: 음성 채널 '상태' 변경 ---
-    is_status_update = (before.channel and after.channel and 
-                        before.channel == after.channel and
-                        after.channel.name == config.VOICE_CHANNEL_NAME and
-                        before.channel_status != after.channel_status)
-
-    if is_status_update and after.channel_status is not None:
-        print(f"상태 변경 감지: {member.display_name} -> '{after.channel_status}'")
-        message = f"{member.mention} 님이 '**{after.channel_status}**' 작업방을 오픈했어요! 🎉"
-        await text_channel.send(message)
-        return
-
-    # --- 시나리오 2: 음성 채널 '입장' ---
+    
     is_join = (before.channel is None or before.channel.name != config.VOICE_CHANNEL_NAME) and \
               (after.channel is not None and after.channel.name == config.VOICE_CHANNEL_NAME)
 
-    if is_join:
-        async with aiosqlite.connect(config.DATABASE_NAME) as db:
+    is_leave = (before.channel is not None and before.channel.name == config.VOICE_CHANNEL_NAME) and \
+               (after.channel is None or after.channel.name != config.VOICE_CHANNEL_NAME)
+
+    async with aiosqlite.connect(config.DATABASE_NAME) as db:
+        if is_join:
             cursor = await db.execute("SELECT check_in FROM active_sessions WHERE user_id = ?", (str(member.id),))
             if await cursor.fetchone() is None:
                 check_in_time = datetime.now(KST)
@@ -256,14 +223,8 @@ async def on_voice_state_update(member, before, after):
                 await db.commit()
                 print(f"{member.display_name}님이 '{config.VOICE_CHANNEL_NAME}' 채널에 입장. DB에 기록.")
                 await text_channel.send(f"{member.mention}님, 작업 시작! 🔥")
-        return
-
-    # --- 시나리오 3: 음성 채널 '퇴장' ---
-    is_leave = (before.channel is not None and before.channel.name == config.VOICE_CHANNEL_NAME) and \
-               (after.channel is None or after.channel.name != config.VOICE_CHANNEL_NAME)
-    
-    if is_leave:
-        async with aiosqlite.connect(config.DATABASE_NAME) as db:
+        
+        elif is_leave:
             cursor = await db.execute("SELECT check_in FROM active_sessions WHERE user_id = ?", (str(member.id),))
             row = await cursor.fetchone()
             if row:
@@ -290,23 +251,55 @@ async def on_voice_state_update(member, before, after):
                 
                 time_report_message = "\n".join(time_report_parts)
                 await text_channel.send(f"{member.mention}님 수고하셨습니다! 👏\n{time_report_message}")
+
+@bot.event
+async def on_message(message):
+    """
+    의도: 봇에게 오는 개인 메시지(DM)를 감지하여, '!집중' 명령어일 경우 집중 타임 시작을 알립니다.
+    """
+    # 봇 자신의 메시지이거나 DM이 아니면 무시합니다.
+    if message.author.bot or not isinstance(message.channel, discord.DMChannel):
+        # DM이 아닐 경우, 서버 채널의 명령어를 처리하도록 합니다.
+        await bot.process_commands(message)
         return
 
+    # DM이 '!집중' 명령어로 시작하는지 확인합니다.
+    if message.content.startswith('!집중'):
+        # '!집중' 부분을 제외한 실제 작업 내용을 추출합니다.
+        task_description = message.content.replace('!집중', '').strip()
+
+        # 작업 내용이 비어있으면 사용자에게 사용법을 안내합니다.
+        if not task_description:
+            await message.channel.send("앗, 어떤 일에 집중할지 알려주세요! 🤔 (예: `!집중 최종 기획서 마무리`)")
+            return
+
+        # 봇이 속한 서버와 공지할 채널을 찾습니다.
+        guild = bot.guilds[0] if bot.guilds else None
+        if not guild:
+            await message.channel.send("오류: 봇이 속한 서버를 찾을 수 없습니다.")
+            return
+
+        text_channel = discord.utils.get(guild.text_channels, name=config.TEXT_CHANNEL_NAME)
+        if not text_channel:
+            await message.channel.send(f"오류: 서버에서 '{config.TEXT_CHANNEL_NAME}' 채널을 찾을 수 없습니다.")
+            return
+
+        # #출석체크 채널에 공지 메시지를 보냅니다.
+        announcement = f"{message.author.mention} 님이 '**{task_description}**' 집중 타임을 오픈했습니다! 함께 달려보세요!"
+        await text_channel.send(announcement)
+        
+        # 사용자에게 확인 메시지를 다시 DM으로 보냅니다.
+        await message.channel.send(f"🔥 좋아요! '**{task_description}**' 집중 타임 시작을 모두에게 알렸어요. 파이팅! 💪")
+    
 # --- Bot Commands ---
 @bot.command(name="현황")
 async def weekly_check_command(ctx):
-    """
-    의도: 사용자가 원할 때 현재까지의 주간 출석 현황을 바로 확인할 수 있도록 합니다.
-    """
     await ctx.send("이번 주 출석 현황을 집계 중입니다... 🗓️")
     report_message = await build_manual_weekly_check_report(ctx.guild, datetime.now(KST).date())
     await ctx.send(report_message)
 
 @bot.command(name="월간결산")
 async def monthly_check_command(ctx, month: int = None):
-    """
-    의도: 사용자가 원할 때 지난달 또는 특정 월의 최종 결산 내역을 확인할 수 있도록 합니다.
-    """
     now = datetime.now(KST)
     year = now.year
     if month is None:
@@ -324,9 +317,6 @@ async def monthly_check_command(ctx, month: int = None):
 # --- Scheduled Tasks ---
 @tasks.loop(minutes=5)
 async def main_scheduler():
-    """
-    의도: 정해진 시간에 주간/월간 리포트를 자동으로 전송하고 월말에 데이터를 초기화합니다.
-    """
     await bot.wait_until_ready()
     now = datetime.now(KST)
     today_str = now.date().isoformat()
