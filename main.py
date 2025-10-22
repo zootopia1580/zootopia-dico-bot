@@ -7,8 +7,8 @@
 - 지정된 음성 채널의 사용자 입장/퇴장 시간을 기록하여 총 활동 시간을 계산합니다.
 - '/data/attendance.db' SQLite 데이터베이스에 모든 기록을 저장합니다.
 - 주간/월간 목표 달성 여부를 자동으로 정산하고 보고합니다.
-- 사용자가 음성 채널 입장 후 봇에게 '!집중' DM을 보내면,
-  현재 음성 채널의 상태 메시지를 가져와 채널에 공지합니다.
+- 사용자가 음성 채널 입장 후 봇에게 '!집중' DM 시: 음성 채널 상태 공지.
+- 사용자가 봇에게 '!집중 [내용]' DM 시: 입력된 [내용] 공지.
 
 [배포 환경]
 - 이 봇은 Render의 Background Worker 서비스를 통해 배포됩니다.
@@ -201,7 +201,6 @@ async def on_ready():
 async def on_voice_state_update(member, before, after):
     """
     의도: 사용자의 음성 채널 '입장'과 '퇴장'만을 감지하여 출석을 기록합니다.
-    (상태 변경 감지 기능은 on_message로 이동되었습니다.)
     """
     if member.bot:
         return
@@ -257,56 +256,98 @@ async def on_voice_state_update(member, before, after):
 @bot.event
 async def on_message(message):
     """
-    의도: 봇에게 오는 개인 메시지(DM)를 감지하여, '!집중' 명령어일 경우
-          사용자가 현재 접속한 음성 채널의 상태를 가져와 공지합니다.
+    의도: 봇에게 오는 개인 메시지(DM)를 감지하여 '!집중' 명령어 처리.
+          '!집중'만 입력 시: 현재 음성 채널 상태를 가져와 공지.
+          '!집중 [내용]' 입력 시: 입력된 [내용]을 공지.
     """
-    # 봇 자신의 메시지이거나 DM이 아니면 무시합니다.
+    # Ignore messages from the bot itself or non-DM messages initially
     if message.author.bot or not isinstance(message.channel, discord.DMChannel):
-        # DM이 아닐 경우, 서버 채널의 명령어를 처리하도록 합니다.
-        await bot.process_commands(message)
-        return
+        # Process commands only if it's not a DM and not from the bot
+        if not isinstance(message.channel, discord.DMChannel) and not message.author.bot:
+            await bot.process_commands(message)
+        return # Stop processing if it's a bot message or not a relevant DM
 
-    # DM이 정확히 '!집중'인지 확인합니다. (앞뒤 공백은 무시)
-    if message.content.strip() == '!집중':
-        
-        # 1. 봇이 속한 서버를 찾습니다.
-        guild = bot.guilds[0] if bot.guilds else None
-        if not guild:
-            await message.channel.send("오류: 봇이 속한 서버를 찾을 수 없습니다.")
-            return
+    # --- DM Processing ---
+    # Check if the DM starts with '!집중'
+    if message.content.startswith('!집중'):
+        command_content = message.content.strip() # Remove leading/trailing whitespace
 
-        # 2. DM을 보낸 사용자의 '서버 멤버' 객체를 찾습니다.
-        member = guild.get_member(message.author.id)
-        if not member:
-            await message.channel.send("오류: 서버에서 사용자님을 찾을 수 없습니다.")
-            return
+        # --- Case 1: Automatic fetch (!집중 only) ---
+        if command_content == '!집중':
+            # 1. Find the guild (server)
+            guild = bot.guilds[0] if bot.guilds else None
+            if not guild:
+                await message.channel.send("오류: 봇이 속한 서버를 찾을 수 없습니다.")
+                return
 
-        # 3. 사용자가 음성 채널에 접속해 있는지, 그 채널이 목표 채널인지 확인합니다.
-        if not member.voice or not member.voice.channel or member.voice.channel.name != config.VOICE_CHANNEL_NAME:
-            await message.channel.send(f"앗! '{config.VOICE_CHANNEL_NAME}' 음성 채널에 먼저 입장하셔야 이 명령어를 사용할 수 있어요. 😮")
-            return
+            # 2. Find the member object in the guild
+            member = guild.get_member(message.author.id)
+            if not member:
+                await message.channel.send("오류: 서버에서 사용자님을 찾을 수 없습니다.")
+                return
+
+            # 3. Check if the member is in the target voice channel
+            if not member.voice or not member.voice.channel or member.voice.channel.name != config.VOICE_CHANNEL_NAME:
+                await message.channel.send(f"앗! '{config.VOICE_CHANNEL_NAME}' 음성 채널에 먼저 입장하셔야 `!집중` 명령어를 사용할 수 있어요. 😮")
+                return
+
+            # 4. Try to get the voice channel status (This uses the correct attribute)
+            try:
+                task_description = member.voice.channel.status # Correct attribute
+            except AttributeError:
+                # This error should now only happen if the Render env issue persists
+                await message.channel.send("앗! 😅 현재 서버 환경 문제로 음성 채널 상태를 자동으로 가져올 수 없어요. 대신 `!집중 [작업 내용]` 형식으로 직접 입력해주세요.")
+                print(f"[ERROR] AttributeError: Could not access member.voice.channel.status for {member.display_name}. Render environment likely still using old discord.py.")
+                return # Stop processing this command
+            except Exception as e:
+                await message.channel.send(f"채널 상태를 가져오는 중 예상치 못한 오류가 발생했어요: {e}")
+                print(f"[ERROR] Unexpected error fetching channel status: {e}")
+                return
+
+            if not task_description:
+                await message.channel.send("음... 😅 음성 채널의 상태 메시지가 비어있어요. 먼저 채널 상태를 설정해주세요!")
+                return
+
+            # 5. Find the announcement channel
+            text_channel = discord.utils.get(guild.text_channels, name=config.TEXT_CHANNEL_NAME)
+            if not text_channel:
+                await message.channel.send(f"오류: 서버에서 '{config.TEXT_CHANNEL_NAME}' 채널을 찾을 수 없습니다.")
+                return
+
+            # 6. Send the announcement
+            announcement = f"{member.mention} 님이 '**{task_description}**' 집중 타임을 오픈했습니다! 함께 달려보세요!"
+            await text_channel.send(announcement)
+
+            # 7. Send confirmation DM
+            await message.channel.send(f"🔥 좋아요! '**{task_description}**' 집중 타임 시작을 모두에게 알렸어요. 파이팅! 💪")
+
+        # --- Case 2: Manual input (!집중 [text]) ---
+        elif command_content.startswith('!집중 '): # Note the space
+            task_description = command_content.replace('!집중', '', 1).strip() # Replace only the first occurrence
+
+            if not task_description:
+                await message.channel.send("앗, 어떤 일에 집중할지 알려주세요! 🤔 (예: `!집중 최종 기획서 마무리`)")
+                return
+
+            # Find guild and channel (same as above, could be refactored)
+            guild = bot.guilds[0] if bot.guilds else None
+            if not guild:
+                await message.channel.send("오류: 봇이 속한 서버를 찾을 수 없습니다.")
+                return
+
+            text_channel = discord.utils.get(guild.text_channels, name=config.TEXT_CHANNEL_NAME)
+            if not text_channel:
+                await message.channel.send(f"오류: 서버에서 '{config.TEXT_CHANNEL_NAME}' 채널을 찾을 수 없습니다.")
+                return
             
-        # 4. 사용자가 접속한 '음성 채널(VoiceChannel)' 객체에서 '.status' 속성을 가져옵니다. (수정된 부분!)
-        task_description = member.voice.channel.status # <-- 여기가 수정되었습니다!
-        
-        if not task_description:
-            await message.channel.send("음... 😅 음성 채널의 상태 메시지가 비어있어요. 먼저 채널 상태를 설정해주세요!")
-            return
+            # Use message.author directly for mention as member object isn't strictly needed here
+            announcement = f"{message.author.mention} 님이 '**{task_description}**' 집중 타임을 오픈했습니다! 함께 달려보세요!"
+            await text_channel.send(announcement)
 
-        # 5. 공지할 텍스트 채널을 찾습니다.
-        text_channel = discord.utils.get(guild.text_channels, name=config.TEXT_CHANNEL_NAME)
-        if not text_channel:
-            await message.channel.send(f"오류: 서버에서 '{config.TEXT_CHANNEL_NAME}' 채널을 찾을 수 없습니다.")
-            return
+            await message.channel.send(f"🔥 좋아요! '**{task_description}**' 집중 타임 시작을 모두에게 알렸어요. 파이팅! 💪")
 
-        # 6. #출석체크 채널에 공지 메시지를 보냅니다.
-        announcement = f"{member.mention} 님이 '**{task_description}**' 집중 타임을 오픈했습니다! 함께 달려보세요!"
-        await text_channel.send(announcement)
-        
-        # 7. 사용자에게 확인 메시지를 다시 DM으로 보냅니다.
-        await message.channel.send(f"🔥 좋아요! '**{task_description}**' 집중 타임 시작을 모두에게 알렸어요. 파이팅! 💪")
+    # Ignore other DMs that don't start with '!집중'
 
-    # `!집중`이 아닌 다른 DM은 무시합니다.
 
 # --- Bot Commands ---
 @bot.command(name="현황")
@@ -328,7 +369,7 @@ async def monthly_check_command(ctx, month: int = None):
         return
 
     await ctx.send(f"**{year}년 {month}월** 최종 결산 내역을 불러오는 중... 🏆")
-    report_message = await build_monthly_final_report(guild, year, month)
+    report_message = await build_monthly_final_report(ctx.guild, year, month)
     await ctx.send(report_message)
 
 # --- Scheduled Tasks ---
