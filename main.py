@@ -8,7 +8,7 @@
 - '/data/attendance.db' SQLite 데이터베이스에 모든 기록을 저장합니다.
 - 주간/월간 목표 달성 여부를 자동으로 정산하고 보고합니다.
 - 사용자가 음성 채널 입장 후 봇에게 '!집중' DM을 보내면,
-  현재 사용자의 음성 상태에 설정된 채널 상태 메시지를 가져와 채널에 공지합니다.
+  현재 음성 채널의 상태 메시지를 가져와 채널에 공지합니다.
 
 [배포 환경]
 - 이 봇은 Render의 Background Worker 서비스를 통해 배포됩니다.
@@ -286,8 +286,8 @@ async def on_message(message):
             await message.channel.send(f"앗! '{config.VOICE_CHANNEL_NAME}' 음성 채널에 먼저 입장하셔야 이 명령어를 사용할 수 있어요. 😮")
             return
             
-        # 4. 사용자의 현재 '음성 상태(VoiceState)' 객체에서 '.channel_status' 속성을 가져옵니다. (수정된 부분!)
-        task_description = member.voice.channel_status # <-- 여기가 수정되었습니다!
+        # 4. 사용자가 접속한 '음성 채널(VoiceChannel)' 객체에서 '.status' 속성을 가져옵니다. (수정된 부분!)
+        task_description = member.voice.channel.status # <-- 여기가 수정되었습니다!
         
         if not task_description:
             await message.channel.send("음... 😅 음성 채널의 상태 메시지가 비어있어요. 먼저 채널 상태를 설정해주세요!")
@@ -328,7 +328,7 @@ async def monthly_check_command(ctx, month: int = None):
         return
 
     await ctx.send(f"**{year}년 {month}월** 최종 결산 내역을 불러오는 중... 🏆")
-    report_message = await build_monthly_final_report(ctx.guild, year, month)
+    report_message = await build_monthly_final_report(guild, year, month)
     await ctx.send(report_message)
 
 # --- Scheduled Tasks ---
