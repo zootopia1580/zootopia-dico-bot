@@ -7,7 +7,8 @@
 - 지정된 음성 채널의 사용자 입장/퇴장 시간을 기록하여 총 활동 시간을 계산합니다.
 - '/data/attendance.db' SQLite 데이터베이스에 모든 기록을 저장합니다.
 - 주간/월간 목표 달성 여부를 자동으로 정산하고 보고합니다.
-- 봇에게 '!집중 [내용]' DM을 보내 작업 시작을 채널에 알립니다.
+- 사용자가 음성 채널 입장 후 봇에게 '!집중' DM을 보내면,
+  현재 음성 채널의 상태 메시지를 가져와 채널에 공지합니다.
 
 [배포 환경]
 - 이 봇은 Render의 Background Worker 서비스를 통해 배포됩니다.
@@ -38,7 +39,7 @@ intents = discord.Intents.default()
 intents.voice_states = True
 intents.members = True
 intents.message_content = True
-intents.dm_messages = True
+intents.dm_messages = True # DM 메시지를 받기 위해 필요합니다.
 
 bot = commands.Bot(command_prefix=config.BOT_PREFIX, intents=intents)
 
@@ -200,6 +201,7 @@ async def on_ready():
 async def on_voice_state_update(member, before, after):
     """
     의도: 사용자의 음성 채널 '입장'과 '퇴장'만을 감지하여 출석을 기록합니다.
+    (상태 변경 감지 기능은 on_message로 이동되었습니다.)
     """
     if member.bot:
         return
@@ -255,7 +257,8 @@ async def on_voice_state_update(member, before, after):
 @bot.event
 async def on_message(message):
     """
-    의도: 봇에게 오는 개인 메시지(DM)를 감지하여, '!집중' 명령어일 경우 집중 타임 시작을 알립니다.
+    의도: 봇에게 오는 개인 메시지(DM)를 감지하여, '!집중' 명령어일 경우
+          사용자가 현재 접속한 음성 채널의 상태를 가져와 공지합니다.
     """
     # 봇 자신의 메시지이거나 DM이 아니면 무시합니다.
     if message.author.bot or not isinstance(message.channel, discord.DMChannel):
@@ -263,34 +266,49 @@ async def on_message(message):
         await bot.process_commands(message)
         return
 
-    # DM이 '!집중' 명령어로 시작하는지 확인합니다.
-    if message.content.startswith('!집중'):
-        # '!집중' 부분을 제외한 실제 작업 내용을 추출합니다.
-        task_description = message.content.replace('!집중', '').strip()
-
-        # 작업 내용이 비어있으면 사용자에게 사용법을 안내합니다.
-        if not task_description:
-            await message.channel.send("앗, 어떤 일에 집중할지 알려주세요! 🤔 (예: `!집중 최종 기획서 마무리`)")
-            return
-
-        # 봇이 속한 서버와 공지할 채널을 찾습니다.
+    # DM이 정확히 '!집중'인지 확인합니다. (앞뒤 공백은 무시)
+    if message.content.strip() == '!집중':
+        
+        # 1. 봇이 속한 서버를 찾습니다.
         guild = bot.guilds[0] if bot.guilds else None
         if not guild:
             await message.channel.send("오류: 봇이 속한 서버를 찾을 수 없습니다.")
             return
 
+        # 2. DM을 보낸 사용자의 '서버 멤버' 객체를 찾습니다.
+        member = guild.get_member(message.author.id)
+        if not member:
+            await message.channel.send("오류: 서버에서 사용자님을 찾을 수 없습니다.")
+            return
+
+        # 3. 사용자가 음성 채널에 접속해 있는지, 그 채널이 목표 채널인지 확인합니다.
+        if not member.voice or not member.voice.channel or member.voice.channel.name != config.VOICE_CHANNEL_NAME:
+            await message.channel.send(f"앗! '{config.VOICE_CHANNEL_NAME}' 음성 채널에 먼저 입장하셔야 이 명령어를 사용할 수 있어요. 😮")
+            return
+            
+        # 4. 사용자의 현재 음성 채널 상태(VoiceState)에서 '채널 상태' 메시지를 가져옵니다.
+        #    이것이 우리가 찾던 '케이뱅크 쓰는 사람들 모이자' 같은 텍스트입니다.
+        task_description = member.voice.channel_status
+        
+        if not task_description:
+            await message.channel.send("음... 😅 음성 채널의 상태 메시지가 비어있어요. 먼저 채널 상태를 설정해주세요!")
+            return
+
+        # 5. 공지할 텍스트 채널을 찾습니다.
         text_channel = discord.utils.get(guild.text_channels, name=config.TEXT_CHANNEL_NAME)
         if not text_channel:
             await message.channel.send(f"오류: 서버에서 '{config.TEXT_CHANNEL_NAME}' 채널을 찾을 수 없습니다.")
             return
 
-        # #출석체크 채널에 공지 메시지를 보냅니다.
-        announcement = f"{message.author.mention} 님이 '**{task_description}**' 집중 타임을 오픈했습니다! 함께 달려보세요!"
+        # 6. #출석체크 채널에 공지 메시지를 보냅니다.
+        announcement = f"{member.mention} 님이 '**{task_description}**' 집중 타임을 오픈했습니다! 함께 달려보세요!"
         await text_channel.send(announcement)
         
-        # 사용자에게 확인 메시지를 다시 DM으로 보냅니다.
+        # 7. 사용자에게 확인 메시지를 다시 DM으로 보냅니다.
         await message.channel.send(f"🔥 좋아요! '**{task_description}**' 집중 타임 시작을 모두에게 알렸어요. 파이팅! 💪")
-    
+
+    # `!집중`이 아닌 다른 DM은 무시합니다.
+
 # --- Bot Commands ---
 @bot.command(name="현황")
 async def weekly_check_command(ctx):
