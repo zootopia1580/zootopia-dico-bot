@@ -286,9 +286,8 @@ async def on_message(message):
             await message.channel.send(f"앗! '{config.VOICE_CHANNEL_NAME}' 음성 채널에 먼저 입장하셔야 이 명령어를 사용할 수 있어요. 😮")
             return
             
-        # 4. 사용자의 현재 음성 채널 상태(VoiceState)에서 '채널 상태' 메시지를 가져옵니다.
-        #    이것이 우리가 찾던 '케이뱅크 쓰는 사람들 모이자' 같은 텍스트입니다.
-        task_description = member.voice.channel_status
+        # 4. 사용자가 접속한 '음성 채널' 객체에서 '.status' 속성을 가져옵니다. (수정된 부분!)
+        task_description = member.voice.channel.status # <-- 여기가 수정되었습니다!
         
         if not task_description:
             await message.channel.send("음... 😅 음성 채널의 상태 메시지가 비어있어요. 먼저 채널 상태를 설정해주세요!")
