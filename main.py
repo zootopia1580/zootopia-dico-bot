@@ -1,9 +1,7 @@
 # main.py
 
 """
-디스코드 음성 채널 출석 체크 봇 (최종 완성본)
-- 기능: 출석 체크, 상태 변경 알림, 목표 관리(DM), 그룹 리포트(Embed)
-- 특징: 모든 명령(목표 설정, 공지 발송, 집중 알림)을 DM으로 수행 가능.
+디스코드 음성 채널 출석 체크 봇 (가독성 최적화 - Clean List Style)
 """
 
 import os
@@ -16,8 +14,9 @@ from collections import defaultdict
 import calendar
 import sys 
 import config
+import re # 정규표현식 사용 (문자열 정리용)
 
-print("★★★★★ 봇 실행! (DM 관리 기능 강화 버전) ★★★★★★")
+print("★★★★★ 봇 실행! (가독성 개선 v2.0) ★★★★★★")
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
@@ -98,6 +97,20 @@ async def generate_weekly_status_line(db, user_id, dates):
         else: line.append(config.STATUS_ICONS["absent"])
     return "".join(line), pass_days
 
+# [NEW] 텍스트 정리 함수 (불렛 포인트 통일)
+def clean_and_format_goal(text):
+    if not text: return "미설정"
+    lines = text.split('\n')
+    cleaned_lines = []
+    for line in lines:
+        line = line.strip()
+        if not line: continue
+        # 맨 앞의 특수문자(-, *, • 등) 제거
+        line = re.sub(r"^[-*•・]\s*", "", line)
+        cleaned_lines.append(f"▫️ {line}")
+    return "\n".join(cleaned_lines)
+
+# [수정됨] 주간 리포트 본문 생성
 async def build_grouped_report_body(guild, dates, is_final=False):
     async with aiosqlite.connect(config.DATABASE_NAME) as db:
         db_users = await get_all_users_for_month(db, dates[0].year, dates[0].month)
@@ -115,16 +128,19 @@ async def build_grouped_report_body(guild, dates, is_final=False):
                 if not member: continue
 
                 status_line, pass_days = await generate_weekly_status_line(db, uid_str, dates)
-                goal_text = await get_weekly_goal_text(db, uid_str, get_this_monday_str()) or "미설정"
+                goal_text = await get_weekly_goal_text(db, uid_str, get_this_monday_str())
                 
-                formatted_goal = goal_text.replace("\n", "\n>    ") 
+                # ★ 깔끔한 리스트 스타일 적용 ★
+                formatted_goal = clean_and_format_goal(goal_text)
+                
                 user_header = f"{status_line} **{member.display_name}**"
                 
                 if is_final:
                     result = "🎉 **달성**" if pass_days >= config.WEEKLY_GOAL_DAYS else "😥 미달성"
                     group_content += f"{user_header} - {result}\n"
                 else:
-                    group_content += f"{user_header}\n> 🎯 {formatted_goal}\n\n"
+                    # 인용구(>) 제거하고 바로 아래에 표시
+                    group_content += f"{user_header}\n{formatted_goal}\n\n"
 
             if group_content:
                 report_data[group_name] = group_content
@@ -206,7 +222,6 @@ async def on_ready():
     main_scheduler.start()
     print(f'✅ {bot.user} 로그인 성공!')
 
-# [기능 1] 상태 변경 감지
 @bot.event
 async def on_voice_channel_status_update(channel, before, after):
     if channel.id != config.VOICE_CHANNEL_ID: return
@@ -221,7 +236,6 @@ async def on_voice_channel_status_update(channel, before, after):
     except: pass
     await text_channel.send(f"📢 {editor} 님이 '**{after}**' 집중 타임을 오픈했습니다! 함께 달려보세요! 🔥")
 
-# [기능 2] 출석 체크
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.bot: return
@@ -257,15 +271,12 @@ async def on_voice_state_update(member, before, after):
                 msg = f"{member.mention}님 수고하셨습니다! 👏\n> 오늘 기록: **{fmt(total)}** / {fmt(goal)}"
                 await text_channel.send(msg)
 
-# [기능 3] DM 및 채팅 명령어 (DM 목표공지 추가됨)
 @bot.event
 async def on_message(message):
     if message.author.bot: return
     
     if isinstance(message.channel, discord.DMChannel):
         content = message.content.strip()
-        
-        # !목표
         if content.startswith('!목표 '):
             goal = content.replace('!목표', '', 1).strip()
             if not goal:
@@ -280,10 +291,10 @@ async def on_message(message):
                 """, (str(message.author.id), goal, week_start))
                 await db.commit()
             
-            pretty_goal = goal.replace("\n", "\n> ")
-            await message.channel.send(f"✅ 이번 주 목표가 저장되었습니다:\n> {pretty_goal}")
+            # 사용자에게 보여줄 때도 깔끔하게 포맷팅
+            formatted = clean_and_format_goal(goal)
+            await message.channel.send(f"✅ 이번 주 목표가 저장되었습니다:\n{formatted}")
             
-        # !집중 (수동)
         elif content.startswith('!집중'):
             if content.startswith('!집중 '):
                 task = content.replace('!집중', '', 1).strip()
@@ -296,18 +307,6 @@ async def on_message(message):
                     await message.channel.send(f"✅ 공지 완료: {task}")
             else:
                 await message.channel.send("💡 사용법: `!집중 [할일]` (직접 입력)")
-
-        # ★ [NEW] !목표공지 (DM에서도 실행 가능하도록 추가)
-        elif content == '!목표공지':
-            if not bot.guilds: return
-            guild = bot.guilds[0]
-            
-            # 봇이 스스로 해당 명령어를 실행하도록 호출
-            ctx = await bot.get_context(message)
-            ctx.guild = guild # DM이라 없는 guild 정보를 수동으로 주입
-            await announce_weekly_goals(ctx)
-            await message.channel.send("✅ 공지 채널에 목표 리스트를 올렸습니다.")
-
     else:
         await bot.process_commands(message)
 
@@ -320,16 +319,9 @@ async def weekly_check_command(ctx):
 
 @bot.command(name="목표공지")
 async def announce_weekly_goals(ctx):
-    # 공지 채널은 ID로 직접 찾습니다 (DM 호출 대응)
-    notice_channel = bot.get_channel(config.NOTICE_CHANNEL_ID)
-    if not notice_channel:
-        if ctx.channel: # 채팅방에서 쳤는데 못 찾은 경우
-            await ctx.send("❌ 설정된 공지 채널을 찾을 수 없습니다.")
-        return
-
-    # DM에서 호출된 경우 ctx.guild가 없을 수 있으므로 notice_channel의 guild를 사용
-    guild = notice_channel.guild
-
+    notice_channel = ctx.guild.get_channel(config.NOTICE_CHANNEL_ID)
+    if not notice_channel: return
+    
     week_start = get_this_monday_str()
     today = datetime.now(KST)
     
@@ -345,19 +337,18 @@ async def announce_weekly_goals(ctx):
             for uid in info["members"]:
                 goal_text = await get_weekly_goal_text(db, str(uid), week_start)
                 if goal_text:
-                    member = guild.get_member(uid)
+                    member = ctx.guild.get_member(uid)
                     name = member.display_name if member else "(알수없음)"
                     
-                    formatted_goal = goal_text.replace("\n", "\n>    ")
-                    content += f"**{name}**\n> 🎯 {formatted_goal}\n\n"
+                    # ★ 깔끔한 포맷팅 적용 ★
+                    formatted_goal = clean_and_format_goal(goal_text)
+                    content += f"**{name}**\n{formatted_goal}\n\n"
             
             if content:
                 embed.add_field(name=group_name, value=content, inline=False)
     
     await notice_channel.send(embed=embed)
-    # 채팅방에서 쳤을 때만 확인 메시지 (DM은 on_message에서 처리)
-    if ctx.channel and not isinstance(ctx.channel, discord.DMChannel):
-        await ctx.send(f"✅ 공지 채널(<#{config.NOTICE_CHANNEL_ID}>)에 목표를 공유했습니다.")
+    await ctx.send(f"✅ 공지 채널(<#{config.NOTICE_CHANNEL_ID}>)에 목표를 공유했습니다.")
 
 @bot.command(name="월간결산")
 async def monthly_check_command(ctx, month: int = None):
@@ -370,17 +361,13 @@ async def monthly_check_command(ctx, month: int = None):
         await ctx.send("올바른 월(1-12)을 입력해주세요.")
         return
     
-    notice_channel = bot.get_channel(config.NOTICE_CHANNEL_ID)
-    # 공지 채널 못 찾으면 명령어를 친 곳으로 보냄
-    target_channel = notice_channel if notice_channel else ctx.channel
-
-    await ctx.send(f"**{year}년 {month}월** 최종 결산 내역을 불러오는 중... 🏆")
+    notice_channel = ctx.guild.get_channel(config.NOTICE_CHANNEL_ID) or ctx.channel
     report = await build_monthly_final_report(ctx.guild, year, month)
-    await target_channel.send(report)
+    await notice_channel.send(report)
 
 @bot.command(name="진단")
 async def diagnose(ctx):
-    await ctx.send("✅ 봇 정상 작동 중! (v9.0 - DM 목표공지)")
+    await ctx.send("✅ 봇 정상 작동 중! (v10.0 - Clean List Style)")
 
 # --- Scheduled Tasks ---
 @tasks.loop(minutes=5)
@@ -394,18 +381,21 @@ async def main_scheduler():
     text_channel = guild.get_channel(config.TEXT_CHANNEL_ID)
     notice_channel = guild.get_channel(config.NOTICE_CHANNEL_ID)
 
+    # 1. 주간 중간 점검
     if now.weekday() == 3 and now.hour == 18 and last_task_run["weekly_mid"] != today_str:
         last_task_run["weekly_mid"] = today_str
         if text_channel: 
             embed = await build_weekly_embed(guild, now.date(), is_final=False)
             await text_channel.send(embed=embed)
 
+    # 2. 주간 최종 결산
     if now.weekday() == 0 and now.hour == 0 and now.minute >= 5 and last_task_run["weekly_final"] != today_str:
         last_task_run["weekly_final"] = today_str
         if text_channel:
             embed = await build_weekly_embed(guild, (now - timedelta(days=1)).date(), is_final=True)
             await text_channel.send(embed=embed)
 
+    # 3. 월간 최종 정산
     if now.day == 1 and now.hour == 1 and last_task_run["monthly_final"] != today_str:
         last_task_run["monthly_final"] = today_str
         target_date = now.date() - timedelta(days=1)
@@ -426,4 +416,4 @@ if __name__ == "__main__":
     if TOKEN:
         bot.run(TOKEN)
     else:
-        print("에러: DISCORD_BOT_TOKEN이 설정되지 않았습니다. .env 파일을 확인해주세요.")
+        print("에러: 토큰 없음")
