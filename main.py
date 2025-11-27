@@ -347,7 +347,7 @@ async def announce_weekly_goals(ctx):
                     # Embed 필드 값용 들여쓰기
                     formatted_goal_embed = formatted_goal.replace("\n", "\n>    ")
 
-                    embed.add_field(name=name, value=f"> 🎯 {formatted_goal_embed}", inline=False)
+                    embed.add_field(name=name, value=f"> {formatted_goal_embed}", inline=False)
                     has_member = True
             
             if has_member:
