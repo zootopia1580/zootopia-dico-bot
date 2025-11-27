@@ -8,9 +8,10 @@ import aiosqlite
 from datetime import datetime, timedelta, time, timezone
 from collections import defaultdict
 import calendar
-import sys 
+import sys
+import json # 데이터 해부용
 
-print("★★★★★ [자동 감지 올인 버전] 봇 실행! 상태 변경을 기다립니다. ★★★★★★")
+print("★★★★★ 봇 실행! (기능 유지 + 데이터 해부 모드) ★★★★★★")
 
 import config
 
@@ -18,17 +19,17 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 KST = timezone(timedelta(hours=9))
 
-# 인텐트 설정 (매우 중요: 하나라도 꺼지면 감지를 못합니다)
 intents = discord.Intents.default()
 intents.voice_states = True
 intents.members = True
 intents.message_content = True
+intents.dm_messages = True
 intents.guilds = True 
 
 bot = commands.Bot(command_prefix=config.BOT_PREFIX, intents=intents)
 last_task_run = defaultdict(lambda: None)
 
-# --- (DB 및 헬퍼 함수 생략 없이 포함) ---
+# --- Database Functions (기존 유지) ---
 async def init_db():
     async with aiosqlite.connect(config.DATABASE_NAME) as db:
         await db.execute("CREATE TABLE IF NOT EXISTS attendance (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, check_in TEXT, check_out TEXT, duration INTEGER, check_in_date TEXT)")
@@ -138,50 +139,36 @@ async def on_ready():
     await init_db()
     main_scheduler.start()
     print(f'✅ {bot.user} 로그인 성공! (ID: {config.VOICE_CHANNEL_ID} 감시 중)')
-    
-    # [진단] 봇이 시작하자마자 채널을 잘 보고 있는지 체크
-    vc = bot.get_channel(config.VOICE_CHANNEL_ID)
-    if vc:
-        print(f"👀 감시 대상 채널 확인됨: {vc.name}")
-    else:
-        print(f"❌ [치명적 오류] 감시 대상 채널(ID: {config.VOICE_CHANNEL_ID})을 찾을 수 없습니다! 권한을 확인하세요.")
 
-# ★★★ [핵심] 여기가 작동해야 합니다 ★★★
-# 음성 채널 상태 변경 감지
+# [기능 1] 음성 채널 상태 변경 감지
 @bot.event
 async def on_voice_channel_status_update(channel, before, after):
-    # 1. 로깅: 이벤트가 발생하는지 확인
-    print(f"🔔 [이벤트 발생] {channel.name} 상태 변경: '{before}' -> '{after}'")
-
-    # 2. ID 확인
     if channel.id != config.VOICE_CHANNEL_ID:
-        print(f"   -> 무시함 (타겟 채널 아님)")
         return
 
-    # 3. 텍스트 채널 확인
     text_channel = channel.guild.get_channel(config.TEXT_CHANNEL_ID)
     if not text_channel:
-        print(f"❌ 오류: 텍스트 채널(ID: {config.TEXT_CHANNEL_ID})을 찾을 수 없음")
         return
 
-    # 4. 공지 전송
+    # 로그 출력 (디버깅용)
+    print(f"🔔 [이벤트 발생] 상태 변경: '{before}' -> '{after}'")
+
     if after:
-        # 누가 바꿨는지 찾기
-        editor_mention = "누군가"
+        editor = None
         try:
             async for entry in channel.guild.audit_logs(limit=1, action=discord.AuditLogAction.voice_channel_status_update):
                 if entry.target.id == channel.id:
-                    editor_mention = entry.user.mention
+                    editor = entry.user
                     break
         except:
-            print("⚠️ 감사 로그 조회 실패 (권한 부족 가능성)")
+            pass
 
-        await text_channel.send(f"📢 {editor_mention} 님이 '**{after}**' 집중 타임을 오픈했습니다! 함께 달려보세요! 🔥")
-        print(f"✅ 공지 전송 완료: {after}")
-    else:
-        print("ℹ️ 상태가 지워짐 (공지 안 함)")
+        if editor:
+            await text_channel.send(f"📢 {editor.mention}님이 '**{after}**' 집중 타임을 오픈했습니다! 함께 달려보세요! 🔥")
+        else:
+            await text_channel.send(f"📢 누군가 '**{after}**' 집중 타임을 오픈했습니다! 함께 달려보세요! 🔥")
 
-# --- 출석 체크 (유지) ---
+# [기능 2] 출석 체크
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.bot: return
@@ -199,7 +186,6 @@ async def on_voice_state_update(member, before, after):
                 now = datetime.now(KST)
                 await db.execute("INSERT INTO active_sessions (user_id, check_in) VALUES (?, ?)", (str(member.id), now.isoformat()))
                 await db.commit()
-                print(f"➡ 입장: {member.display_name}")
                 await text_channel.send(f"{member.mention}님, 작업 시작! 🔥")
         elif is_leave:
             cursor = await db.execute("SELECT check_in FROM active_sessions WHERE user_id = ?", (str(member.id),))
@@ -215,33 +201,46 @@ async def on_voice_state_update(member, before, after):
                 total = await get_today_total_duration(db, str(member.id), check_out.date().isoformat())
                 h, r = divmod(total, 3600)
                 m, _ = divmod(r, 60)
-                print(f"⬅ 퇴장: {member.display_name}")
                 await text_channel.send(f"{member.mention}님 수고하셨습니다! (오늘: {int(h)}시간 {int(m)}분)")
 
-# --- 수동 명령어 (!집중 [내용] - 비상용) ---
+# [기능 3] 수동 명령 (!집중)
 @bot.event
 async def on_message(message):
     if message.author.bot: return
     
     if isinstance(message.channel, discord.DMChannel):
-        if message.content.startswith('!집중 '):
+        if message.content.startswith('!집중'):
             content = message.content.replace('!집중', '').strip()
             if not bot.guilds: return
             guild = bot.guilds[0]
             text_channel = guild.get_channel(config.TEXT_CHANNEL_ID)
             
-            if text_channel:
+            # 1. 수동 입력 (!집중 내용)
+            if content:
                 member = guild.get_member(message.author.id)
-                await text_channel.send(f"📢 {member.mention} 님이 '**{content}**' 집중 타임을 오픈했습니다! 함께 달려보세요! 🔥")
-                await message.channel.send(f"✅ 수동 공지 완료: {content}")
+                if member:
+                    await text_channel.send(f"{member.mention} 님이 '**{content}**' 집중 타임을 오픈했습니다! 함께 달려보세요!")
+                    await message.channel.send(f"✅ 알림 전송 완료: {content}")
+            
+            # 2. 자동 불러오기 시도 (!집중)
             else:
-                await message.channel.send("채널을 찾을 수 없습니다.")
-        elif message.content.strip() == '!집중':
-            await message.channel.send("💡 자동 감지가 안 되나요? `!집중 [할일]` 처럼 내용을 직접 적어주세요!")
+                try:
+                    target_channel = await bot.fetch_channel(config.VOICE_CHANNEL_ID)
+                    # status라고 추정되는 값을 일단 가져와 봅니다.
+                    status = getattr(target_channel, 'status', None)
+                    
+                    if status:
+                        member = guild.get_member(message.author.id)
+                        await text_channel.send(f"{member.mention} 님이 '**{status}**' 집중 타임을 오픈했습니다! 함께 달려보세요!")
+                        await message.channel.send(f"🔥 알림 전송 완료: {status}")
+                    else:
+                        await message.channel.send("봇이 채널 상태를 읽지 못했습니다. `!집중 [내용]`으로 직접 입력해주세요.")
+                except Exception as e:
+                    await message.channel.send(f"오류 발생: {e}")
     else:
         await bot.process_commands(message)
 
-# --- Bot Commands & Scheduler (기존 동일) ---
+# --- Bot Commands ---
 @bot.command(name="현황")
 async def weekly_check_command(ctx):
     await ctx.send("이번 주 출석 현황을 집계 중입니다... 🗓️")
@@ -262,11 +261,40 @@ async def monthly_check_command(ctx, month: int = None):
     report_message = await build_monthly_final_report(ctx.guild, year, month)
     await ctx.send(report_message)
 
-@bot.command(name="진단")
-async def diagnose(ctx):
-    # 아주 간단한 생존 신고
-    await ctx.send(f"✅ 봇 정상 작동 중! (v2.6.4)")
+# ★★★ [NEW] 정밀 해부 명령어 ★★★
+@bot.command(name="해부")
+async def anatomy(ctx):
+    try:
+        channel = await bot.fetch_channel(config.VOICE_CHANNEL_ID)
+    except Exception as e:
+        await ctx.send(f"❌ 채널 찾기 실패: {e}")
+        return
 
+    msg = f"🔍 **'{channel.name}'** 데이터 해부 시작...\n"
+    
+    # 1. 라이브러리 속성 확인
+    suspects = ['status', 'topic', 'activity', 'state', 'custom_status']
+    msg += "**[라이브러리 속성]**\n"
+    for attr in suspects:
+        val = getattr(channel, attr, "❌ 없음")
+        msg += f"- `{attr}`: {val}\n"
+
+    # 2. 원본 데이터(Raw JSON) 확인
+    try:
+        raw_data = await bot.http.request(discord.http.Route('GET', f'/channels/{config.VOICE_CHANNEL_ID}'))
+        raw_str = json.dumps(raw_data, indent=2, ensure_ascii=False)
+        
+        # 메시지가 너무 길면 잘라서 보냄
+        if len(raw_str) > 1000:
+            raw_str = raw_str[:1000] + "\n... (생략)"
+        
+        msg += f"\n**[디스코드 원본 데이터]**\n```json\n{raw_str}```"
+    except Exception as e:
+        msg += f"\n❌ 원본 데이터 조회 실패: {e}"
+
+    await ctx.send(msg)
+
+# --- Scheduled Tasks ---
 @tasks.loop(minutes=5)
 async def main_scheduler():
     await bot.wait_until_ready()
