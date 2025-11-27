@@ -319,34 +319,56 @@ async def weekly_check_command(ctx):
 
 @bot.command(name="목표공지")
 async def announce_weekly_goals(ctx):
-    notice_channel = ctx.guild.get_channel(config.NOTICE_CHANNEL_ID)
-    if not notice_channel: return
+    # 1. 공지 채널 찾기 (봇 전체 범위에서 ID로 찾기)
+    notice_channel = bot.get_channel(config.NOTICE_CHANNEL_ID)
     
+    # 채널을 못 찾았을 경우 에러 메시지 출력
+    if not notice_channel:
+        await ctx.send(f"❌ 설정된 공지 채널(ID: {config.NOTICE_CHANNEL_ID})을 찾을 수 없습니다.\n`config.py`의 ID를 확인해주세요!")
+        return
+
     week_start = get_this_monday_str()
     today = datetime.now(KST)
     
+    # Embed 생성
     embed = discord.Embed(
         title=f"📢 {today.month}월 {get_week_of_month(today.date())}주차 주간 목표",
         description="이번 주도 힘차게 달려봅시다! 🔥",
         color=0x3498db
     )
 
+    has_data = False # 데이터가 하나라도 있는지 체크하는 변수
+
     async with aiosqlite.connect(config.DATABASE_NAME) as db:
         for group_name, info in config.USER_GROUPS.items():
             content = ""
             for uid in info["members"]:
+                # DB에서 목표 가져오기
                 goal_text = await get_weekly_goal_text(db, str(uid), week_start)
+                
                 if goal_text:
-                    member = ctx.guild.get_member(uid)
+                    has_data = True # 데이터 있음!
+                    member = ctx.guild.get_member(uid) if ctx.guild else bot.get_guild(guild_id_here).get_member(uid) 
+                    # 위 라인은 복잡하니 아래처럼 단순화해서 member를 찾습니다.
+                    # 봇이 있는 첫번째 서버에서 멤버를 찾습니다.
+                    if bot.guilds:
+                        member = bot.guilds[0].get_member(uid)
+
                     name = member.display_name if member else "(알수없음)"
                     
-                    # ★ 깔끔한 포맷팅 적용 ★
-                    formatted_goal = clean_and_format_goal(goal_text)
-                    content += f"**{name}**\n{formatted_goal}\n\n"
+                    # 포맷팅
+                    formatted_goal = goal_text.replace("\n", "\n>    ")
+                    content += f"**{name}**\n> 🎯 {formatted_goal}\n\n"
             
             if content:
                 embed.add_field(name=group_name, value=content, inline=False)
     
+    # 2. 데이터가 없을 경우 안내 메시지 출력
+    if not has_data:
+        await ctx.send("📭 **등록된 목표가 없습니다!**\n먼저 DM으로 `!목표 [내용]`을 보내서 목표를 등록해주세요.")
+        return
+
+    # 3. 전송 성공
     await notice_channel.send(embed=embed)
     await ctx.send(f"✅ 공지 채널(<#{config.NOTICE_CHANNEL_ID}>)에 목표를 공유했습니다.")
 
