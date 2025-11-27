@@ -1,9 +1,9 @@
 # main.py
 
 """
-디스코드 음성 채널 출석 체크 봇 (최적화 버전)
-- 불필요한 연산 및 로그 제거
-- 메시지 디테일 유지
+디스코드 음성 채널 출석 체크 봇 (초기 데이터 주입 포함 버전)
+- 기능: 출석 체크, 상태 변경 알림, 목표 관리(DM), 그룹 리포트
+- 특징: 봇 실행 시 '금주의 목표' 데이터를 자동으로 DB에 넣습니다.
 """
 
 import os
@@ -18,7 +18,7 @@ import sys
 import config
 
 # --- Bot Setup ---
-print("★★★★★ 봇 코드 실행 (최적화 버전) ★★★★★★")
+print("★★★★★ 봇 코드 실행 (초기 데이터 주입 모드) ★★★★★★")
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
@@ -130,7 +130,7 @@ async def build_grouped_report_body(guild, dates, is_final=False):
             if lines:
                 report_sections.append(f"\n**{group_name}**\n" + "\n".join(lines))
 
-        # 2. 기타 인원 (그룹 미포함자)
+        # 2. 기타 인원
         others = []
         for uid_str in all_user_ids:
             is_in_group = False
@@ -194,48 +194,77 @@ async def on_ready():
     main_scheduler.start()
     print(f'✅ {bot.user} 로그인 성공!')
 
+    # --- [일회용] 초기 목표 데이터 주입 ---
+    print("🔄 초기 목표 데이터 주입을 시작합니다...")
+    week_start = get_this_monday_str()
+    
+    # 지연님 내용은 요약하여 처리했습니다.
+    initial_goals = {
+        # 혜민
+        "1339540906914746390": "- 회사일마무리\n- 포폴대공사 및 지원 again",
+        # 승주
+        "805463906620669972": "- 재영쌤한테 이력서+포폴 던지기\n- 소프티어 과제제출 하기\n- 외주끝내는 김에 피그마 컴포넌트 약간의 연구",
+        # 다인
+        "1216225553686859788": "일단 회사일 끝내고 . . . 회고를 좀 해봐야할 거 같슨",
+        # 선빈
+        "900000344602443857": "없음",
+        # 수빈
+        "1196364716147216415": "- 새로 지원할 곳 물색\n- AI 프로젝트에 참여하게됨 -> 민폐 끼치지 않고 참여하기\n- 겨울신상 업로드\n- 포트폴리오 다듬기..........\n- 이력서 다듬기",
+        # 지혜
+        "967781976486608916": "- 회사에 구걸하기 + 플랜 B 킵고잉\n- 친애하는 X 정주행",
+        # 지연 (요약됨)
+        "900314845667295262": "[스튜디오] 도서화 작업 및 작품 제작 서포트\n[연구실] HCI/TEI 논문 및 영상 제출 준비\n[개인] 한국디자인학회 발표 준비(29일)\n[건강] 죽지 않기",
+        # 서현
+        "752488606353850408": "- 면접 잘 헤쳐나가기\n- 포트폴리오 스토리라인 2.0 버전 만들기\n- 웹포트폴리오 시작",
+        # 성민
+        "968492300642697237": "- 실기이거진짠가 멘붕하기\n- 묻지마면접 기도하기\n- 지금 깍두기 신세되어서 불안띠한 회사일 열심히.."
+    }
+
+    async with aiosqlite.connect(config.DATABASE_NAME) as db:
+        for uid, goal in initial_goals.items():
+            await db.execute("""
+                INSERT INTO weekly_goals (user_id, goal_text, week_start_date) 
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id, week_start_date) DO UPDATE SET goal_text = excluded.goal_text
+            """, (str(uid), goal, week_start))
+        await db.commit()
+    print("✅ 초기 목표 데이터 주입 완료!")
+    # -----------------------------------
+
 # [기능 1] 상태 변경 감지
 @bot.event
 async def on_voice_channel_status_update(channel, before, after):
     if channel.id != config.VOICE_CHANNEL_ID: return
     text_channel = channel.guild.get_channel(config.TEXT_CHANNEL_ID)
-    if not text_channel or not after: return
-
-    editor = "누군가"
-    try:
-        async for entry in channel.guild.audit_logs(limit=1, action=discord.AuditLogAction.voice_channel_status_update):
-            if entry.target.id == channel.id:
-                editor = entry.user.mention; break
-    except: pass
-    await text_channel.send(f"📢 {editor} 님이 '**{after}**' 집중 타임을 오픈했습니다! 함께 달려보세요! 🔥")
+    if not text_channel: return
+    if after:
+        editor = "누군가"
+        try:
+            async for entry in channel.guild.audit_logs(limit=1, action=discord.AuditLogAction.voice_channel_status_update):
+                if entry.target.id == channel.id:
+                    editor = entry.user.mention; break
+        except: pass
+        await text_channel.send(f"📢 {editor} 님이 '**{after}**' 집중 타임을 오픈했습니다! 함께 달려보세요! 🔥")
 
 # [기능 2] 출석 체크
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.bot: return
-    
-    target_id = config.VOICE_CHANNEL_ID
-    # 채널 이동이 없는 경우(마이크만 끄거나 등)는 무시
-    if before.channel == after.channel: return
-
     text_channel = member.guild.get_channel(config.TEXT_CHANNEL_ID)
     if not text_channel: return
 
+    target_id = config.VOICE_CHANNEL_ID
     is_join = (not before.channel or before.channel.id != target_id) and (after.channel and after.channel.id == target_id)
     is_leave = (before.channel and before.channel.id == target_id) and (not after.channel or after.channel.id != target_id)
 
-    if not (is_join or is_leave): return
-
     async with aiosqlite.connect(config.DATABASE_NAME) as db:
         if is_join:
-            # 중복 입장 방지 체크
             cursor = await db.execute("SELECT check_in FROM active_sessions WHERE user_id = ?", (str(member.id),))
             if await cursor.fetchone() is None:
                 now = datetime.now(KST)
                 await db.execute("INSERT INTO active_sessions (user_id, check_in) VALUES (?, ?)", (str(member.id), now.isoformat()))
                 await db.commit()
                 await text_channel.send(f"{member.mention}님, 작업 시작! 🔥")
-        
         elif is_leave:
             cursor = await db.execute("SELECT check_in FROM active_sessions WHERE user_id = ?", (str(member.id),))
             row = await cursor.fetchone()
@@ -243,16 +272,13 @@ async def on_voice_state_update(member, before, after):
                 check_in = datetime.fromisoformat(row[0])
                 check_out = datetime.now(KST)
                 await db.execute("DELETE FROM active_sessions WHERE user_id = ?", (str(member.id),))
-                
-                # 날짜별 세션 분리 및 저장
                 for s in split_session_by_day(check_in, check_out):
                     await db.execute("INSERT INTO attendance (user_id, check_in, check_out, duration, check_in_date) VALUES (?, ?, ?, ?, ?)", 
                                      (str(member.id), s["check_in"], s["check_out"], s["duration"], datetime.fromisoformat(s["check_in"]).date().isoformat()))
                 await db.commit()
                 
-                # 메시지 전송
                 total = await get_today_total_duration(db, str(member.id), check_out.date().isoformat())
-                goal = config.get_user_goal(member.id)
+                goal = config.get_user_goal(member.id) 
                 
                 def fmt(sec): return f"{int(sec//3600)}시간 {int((sec%3600)//60)}분"
                 msg = f"{member.mention}님 수고하셨습니다! 👏\n> 오늘 기록: **{fmt(total)}** / {fmt(goal)}"
@@ -283,18 +309,14 @@ async def on_message(message):
                 """, (str(message.author.id), goal, week_start))
                 await db.commit()
             
-            # 줄바꿈 예쁘게
             pretty_goal = goal.replace("\n", "\n> ")
             await message.channel.send(f"✅ 이번 주 목표가 저장되었습니다:\n> {pretty_goal}")
             
         # !집중 (수동/안내)
         elif content.startswith('!집중'):
-            # 수동 입력 (!집중 내용)
             if content.startswith('!집중 '):
                 task = content.replace('!집중', '', 1).strip()
                 if not bot.guilds: return
-                
-                # 공통 채널/멤버 조회 로직
                 guild = bot.guilds[0]
                 text_channel = guild.get_channel(config.TEXT_CHANNEL_ID)
                 member = guild.get_member(message.author.id)
@@ -305,7 +327,6 @@ async def on_message(message):
                 else:
                     await message.channel.send("오류: 서버나 채널을 찾을 수 없습니다.")
             else:
-                # 내용 없이 !집중 -> 안내
                 await message.channel.send("💡 사용법: `!집중 [할일]` (직접 입력) 또는 음성 채널 상태를 변경해주세요!")
 
     # 채팅방 명령어
@@ -373,7 +394,7 @@ async def monthly_check_command(ctx, month: int = None):
 
 @bot.command(name="진단")
 async def diagnose(ctx):
-    await ctx.send("✅ 봇 정상 작동 중! (최적화 v4.0)")
+    await ctx.send("✅ 봇 정상 작동 중! (v4.0 - 초기 데이터 주입)")
 
 # --- Scheduled Tasks ---
 @tasks.loop(minutes=5)
@@ -387,18 +408,15 @@ async def main_scheduler():
     text_channel = guild.get_channel(config.TEXT_CHANNEL_ID)
     notice_channel = guild.get_channel(config.NOTICE_CHANNEL_ID)
 
-    # 1. 주간 중간 점검 (목요일 18시)
     if now.weekday() == 3 and now.hour == 18 and last_task_run["weekly_mid"] != today_str:
         last_task_run["weekly_mid"] = today_str
         if text_channel: await text_channel.send(await build_weekly_mid_report(guild, now.date()))
 
-    # 2. 주간 최종 결산 (월요일 0시)
     if now.weekday() == 0 and now.hour == 0 and now.minute >= 5 and last_task_run["weekly_final"] != today_str:
         last_task_run["weekly_final"] = today_str
         msg = await build_manual_weekly_check_report(guild, (now - timedelta(days=1)).date())
         if text_channel: await text_channel.send(f"[✅ 주간 결산]\n{msg}")
 
-    # 3. 월간 최종 정산 (매월 1일 1시) -> 공지 채널
     if now.day == 1 and now.hour == 1 and last_task_run["monthly_final"] != today_str:
         last_task_run["monthly_final"] = today_str
         target_date = now.date() - timedelta(days=1)
