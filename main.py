@@ -2,6 +2,11 @@
 
 """
 디스코드 음성 채널 출석 체크 봇 (Discord Voice Channel Attendance Bot)
+[기능]
+1. 자동 감지: 음성 채널 상태(제목) 변경 시 자동 공지
+2. 출석 체크: 입장/퇴장 시간 자동 기록
+3. 수동 명령: !집중 명령어로 수동 공지 가능
+4. 관리: 주간/월간 리포트 및 데이터베이스 관리
 """
 
 import os
@@ -14,7 +19,7 @@ from collections import defaultdict
 import calendar
 import sys 
 
-print("★★★★★ 최종 버전 봇 코드 실행 시작! (fetch_channel 적용) ★★★★★★")
+print("★★★★★ 봇 코드 실행 시작! (자동 감지 + 수동 명령 통합 버전) ★★★★★★")
 
 # --- Local Imports ---
 import config
@@ -29,6 +34,7 @@ intents.voice_states = True
 intents.members = True
 intents.message_content = True
 intents.dm_messages = True
+intents.guilds = True # 채널 변경 감지를 위해 필수
 
 bot = commands.Bot(command_prefix=config.BOT_PREFIX, intents=intents)
 
@@ -186,6 +192,42 @@ async def on_ready():
     print(f'{bot.user}으로 로그인 성공!')
     print("메인 스케줄러가 시작되었습니다.")
 
+# --- [핵심 1] 자동 감지 기능 (복구됨!) ---
+@bot.event
+async def on_guild_channel_update(before, after):
+    """
+    의도: 음성 채널의 상태(status)가 변경되면 이를 감지하여 자동으로 채팅방에 공지합니다.
+    """
+    # 1. 우리가 감시하는 음성 채널인지 확인
+    if not isinstance(after, discord.VoiceChannel) or after.name != config.VOICE_CHANNEL_NAME:
+        return
+
+    # 2. 상태(status)가 변경되었는지 확인 (안전하게 getattr 사용)
+    before_status = getattr(before, 'status', None)
+    after_status = getattr(after, 'status', None)
+
+    # 상태가 같으면 무시 (이름만 바뀌거나 한 경우)
+    if before_status == after_status:
+        return
+
+    # 3. 공지할 텍스트 채널 찾기
+    text_channel = discord.utils.get(after.guild.text_channels, name=config.TEXT_CHANNEL_NAME)
+    if not text_channel:
+        return
+
+    # 4. 상태가 비워진 경우 ('') 무시, 내용이 있을 때만 알림
+    if after_status:
+        # 누가 바꿨는지 감사 로그(Audit Log)에서 찾기
+        async for entry in after.guild.audit_logs(limit=5, action=discord.AuditLogAction.channel_update):
+            if entry.target.id == after.id:
+                # 찾았다! 공지 메시지 전송
+                await text_channel.send(f"📢 {entry.user.mention}님이 '**{after_status}**' 집중 타임을 오픈했습니다! 함께 달려보세요! 🔥")
+                break
+        else:
+            # 감사 로그에서 못 찾았을 경우 (드문 경우)
+            await text_channel.send(f"📢 누군가 '**{after_status}**' 집중 타임을 오픈했습니다! 함께 달려보세요! 🔥")
+
+# --- [핵심 2] 출석 체크 기능 ---
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.bot: return
@@ -229,6 +271,7 @@ async def on_voice_state_update(member, before, after):
                 time_report_message = "\n".join(time_report_parts)
                 await text_channel.send(f"{member.mention}님 수고하셨습니다! 👏\n{time_report_message}")
 
+# --- [핵심 3] 수동 명령 기능 ---
 @bot.event
 async def on_message(message):
     if message.author.bot or not isinstance(message.channel, discord.DMChannel):
@@ -249,29 +292,27 @@ async def on_message(message):
             await message.channel.send("오류: 서버에서 사용자님을 찾을 수 없습니다.")
             return
 
-        # Case 1: !집중 (자동 불러오기) - 수정된 로직
+        text_channel = discord.utils.get(guild.text_channels, name=config.TEXT_CHANNEL_NAME)
+        if not text_channel:
+            await message.channel.send(f"오류: 서버에서 '{config.TEXT_CHANNEL_NAME}' 채널을 찾을 수 없습니다.")
+            return
+
+        # Case 1: !집중 (현재 상태 가져오기)
         if command_content == '!집중':
             if not member.voice or not member.voice.channel or member.voice.channel.name != config.VOICE_CHANNEL_NAME:
                 await message.channel.send(f"앗! '{config.VOICE_CHANNEL_NAME}' 음성 채널에 먼저 입장하셔야 `!집중` 명령어를 사용할 수 있어요. 😮")
                 return
             
-            # ★★★ 여기가 핵심 수정사항입니다 ★★★
             try:
-                # 캐시된 member.voice.channel 대신, 봇이 직접 채널 정보를 새로 받아옵니다(Fetch).
                 channel_id = member.voice.channel.id
                 fresh_channel = await bot.fetch_channel(channel_id)
-                task_description = getattr(fresh_channel, 'status', None) # status 속성이 없으면 None 반환
+                task_description = getattr(fresh_channel, 'status', None)
             except Exception as e:
                 await message.channel.send(f"채널 정보를 가져오는 중 오류가 발생했어요: {e}")
                 return
 
             if not task_description:
-                await message.channel.send(f"음... 😅 '{fresh_channel.name}' 채널의 상태 메시지가 비어있어요. 먼저 채널 상태를 설정해주세요!")
-                return
-
-            text_channel = discord.utils.get(guild.text_channels, name=config.TEXT_CHANNEL_NAME)
-            if not text_channel:
-                await message.channel.send(f"오류: 서버에서 '{config.TEXT_CHANNEL_NAME}' 채널을 찾을 수 없습니다.")
+                await message.channel.send(f"음... 😅 '{fresh_channel.name}' 채널의 상태 메시지가 비어있어요.")
                 return
 
             announcement = f"{member.mention} 님이 '**{task_description}**' 집중 타임을 오픈했습니다! 함께 달려보세요!"
@@ -285,11 +326,6 @@ async def on_message(message):
                 await message.channel.send("앗, 어떤 일에 집중할지 알려주세요!")
                 return
             
-            text_channel = discord.utils.get(guild.text_channels, name=config.TEXT_CHANNEL_NAME)
-            if not text_channel:
-                await message.channel.send(f"오류: 서버에서 '{config.TEXT_CHANNEL_NAME}' 채널을 찾을 수 없습니다.")
-                return
-
             announcement = f"{message.author.mention} 님이 '**{task_description}**' 집중 타임을 오픈했습니다! 함께 달려보세요!"
             await text_channel.send(announcement)
             await message.channel.send(f"🔥 좋아요! '**{task_description}**' 집중 타임 시작을 모두에게 알렸어요. 파이팅! 💪")
@@ -315,7 +351,6 @@ async def monthly_check_command(ctx, month: int = None):
     report_message = await build_monthly_final_report(ctx.guild, year, month)
     await ctx.send(report_message)
 
-# --- [NEW] 진단 명령어 (유지) ---
 @bot.command(name="진단")
 async def diagnose(ctx):
     import discord
@@ -324,11 +359,10 @@ async def diagnose(ctx):
     status_check = ""
     if ctx.author.voice and ctx.author.voice.channel:
         channel = ctx.author.voice.channel
-        # 진단에서도 fetch를 시도해서 비교해줍니다.
         try:
             fresh_channel = await bot.fetch_channel(channel.id)
             val = getattr(fresh_channel, 'status', 'None')
-            status_check = f"\n✅ '{channel.name}' 상태 (새로고침): {val}"
+            status_check = f"\n✅ '{channel.name}' 상태: {val}"
         except:
             status_check = "\n⚠️ 채널 정보 새로고침 실패"
     else:
@@ -348,12 +382,10 @@ async def main_scheduler():
 
     if now.weekday() == 3 and now.hour == 18 and last_task_run["weekly_mid"] != today_str:
         last_task_run["weekly_mid"] = today_str
-        print(f"[{now}] 스케줄러: 주간 중간 점검 실행")
         await channel.send(await build_weekly_mid_report(guild, now.date()))
 
     if now.weekday() == 0 and now.hour == 0 and now.minute >= 5 and last_task_run["weekly_final"] != today_str:
         last_task_run["weekly_final"] = today_str
-        print(f"[{now}] 스케줄러: 주간 최종 결산 실행")
         last_sunday = now.date() - timedelta(days=1)
         week_start = last_sunday - timedelta(days=6)
         dates = [week_start + timedelta(days=i) for i in range(7)]
@@ -377,7 +409,6 @@ async def main_scheduler():
         body.append("\n새로운 한 주도 함께 파이팅입니다!")
         await channel.send("\n".join([header] + body))
         if get_week_of_month(last_sunday) == 3:
-            print(f"[{now}] 스케줄러: 월간 중간 결산 실행")
             header = config.MESSAGE_HEADINGS["monthly_mid_check"].format(month=last_sunday.month)
             mid_body = [f"벌써 마지막 주네요! {last_sunday.month}월 사용료 면제 현황을 알려드립니다."]
             for user_id in users:
@@ -392,7 +423,6 @@ async def main_scheduler():
 
     if now.day == 1 and now.hour == 1 and last_task_run["monthly_final"] != today_str:
         last_task_run["monthly_final"] = today_str
-        print(f"[{now}] 스케줄러: 월간 최종 정산 및 데이터 삭제 실행")
         target_date = now.date() - timedelta(days=1)
         year, month = target_date.year, target_date.month
         report_message = await build_monthly_final_report(guild, year, month)
