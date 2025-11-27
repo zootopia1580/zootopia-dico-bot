@@ -12,9 +12,9 @@ import aiosqlite
 from datetime import datetime, timedelta, time, timezone
 from collections import defaultdict
 import calendar
-import sys # 버전 확인용
+import sys 
 
-print("★★★★★ 최종 버전 봇 코드 실행 시작! (오류 수정 완료) ★★★★★★")
+print("★★★★★ 최종 버전 봇 코드 실행 시작! (fetch_channel 적용) ★★★★★★")
 
 # --- Local Imports ---
 import config
@@ -178,7 +178,164 @@ async def build_monthly_final_report(guild: discord.Guild, year: int, month: int
     body.extend(charge_users if charge_users else ["- 대상자가 없습니다."])
     return "\n".join([header] + body)
 
-# --- Scheduled Tasks (누락되었던 부분 복구) ---
+# --- Bot Events ---
+@bot.event
+async def on_ready():
+    await init_db()
+    main_scheduler.start()
+    print(f'{bot.user}으로 로그인 성공!')
+    print("메인 스케줄러가 시작되었습니다.")
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if member.bot: return
+    text_channel = discord.utils.get(member.guild.text_channels, name=config.TEXT_CHANNEL_NAME)
+    if not text_channel: return
+    
+    is_join = (before.channel is None or before.channel.name != config.VOICE_CHANNEL_NAME) and \
+              (after.channel is not None and after.channel.name == config.VOICE_CHANNEL_NAME)
+    is_leave = (before.channel is not None and before.channel.name == config.VOICE_CHANNEL_NAME) and \
+               (after.channel is None or after.channel.name != config.VOICE_CHANNEL_NAME)
+
+    async with aiosqlite.connect(config.DATABASE_NAME) as db:
+        if is_join:
+            cursor = await db.execute("SELECT check_in FROM active_sessions WHERE user_id = ?", (str(member.id),))
+            if await cursor.fetchone() is None:
+                check_in_time = datetime.now(KST)
+                await db.execute("INSERT INTO active_sessions (user_id, check_in) VALUES (?, ?)", (str(member.id), check_in_time.isoformat()))
+                await db.commit()
+                print(f"{member.display_name}님이 '{config.VOICE_CHANNEL_NAME}' 채널에 입장.")
+                await text_channel.send(f"{member.mention}님, 작업 시작! 🔥")
+        elif is_leave:
+            cursor = await db.execute("SELECT check_in FROM active_sessions WHERE user_id = ?", (str(member.id),))
+            row = await cursor.fetchone()
+            if row:
+                check_in_time = datetime.fromisoformat(row[0])
+                check_out_time = datetime.now(KST)
+                await db.execute("DELETE FROM active_sessions WHERE user_id = ?", (str(member.id),))
+                sessions_to_insert = split_session_by_day(check_in_time, check_out_time)
+                for session in sessions_to_insert:
+                    await db.execute("INSERT INTO attendance (user_id, check_in, check_out, duration, check_in_date) VALUES (?, ?, ?, ?, ?)",
+                                     (str(member.id), session["check_in"], session["check_out"], session["duration"], datetime.fromisoformat(session["check_in"]).date().isoformat()))
+                await db.commit()
+                print(f"{member.display_name}님이 '{config.VOICE_CHANNEL_NAME}' 채널에서 퇴장.")
+                involved_dates = sorted(list(set([datetime.fromisoformat(s["check_in"]).date() for s in sessions_to_insert])))
+                time_report_parts = []
+                for report_date in involved_dates:
+                    total_seconds = await get_today_total_duration(db, str(member.id), report_date.isoformat())
+                    hours, remainder = divmod(total_seconds, 3600)
+                    minutes, _ = divmod(remainder, 60)
+                    time_report_parts.append(f"> {report_date.day}일 총 작업 시간: {int(hours):02d}시간 {int(minutes):02d}분")
+                time_report_message = "\n".join(time_report_parts)
+                await text_channel.send(f"{member.mention}님 수고하셨습니다! 👏\n{time_report_message}")
+
+@bot.event
+async def on_message(message):
+    if message.author.bot or not isinstance(message.channel, discord.DMChannel):
+        if not isinstance(message.channel, discord.DMChannel) and not message.author.bot:
+            await bot.process_commands(message)
+        return
+
+    if message.content.startswith('!집중'):
+        command_content = message.content.strip()
+        
+        guild = bot.guilds[0] if bot.guilds else None
+        if not guild:
+            await message.channel.send("오류: 봇이 속한 서버를 찾을 수 없습니다.")
+            return
+        
+        member = guild.get_member(message.author.id)
+        if not member:
+            await message.channel.send("오류: 서버에서 사용자님을 찾을 수 없습니다.")
+            return
+
+        # Case 1: !집중 (자동 불러오기) - 수정된 로직
+        if command_content == '!집중':
+            if not member.voice or not member.voice.channel or member.voice.channel.name != config.VOICE_CHANNEL_NAME:
+                await message.channel.send(f"앗! '{config.VOICE_CHANNEL_NAME}' 음성 채널에 먼저 입장하셔야 `!집중` 명령어를 사용할 수 있어요. 😮")
+                return
+            
+            # ★★★ 여기가 핵심 수정사항입니다 ★★★
+            try:
+                # 캐시된 member.voice.channel 대신, 봇이 직접 채널 정보를 새로 받아옵니다(Fetch).
+                channel_id = member.voice.channel.id
+                fresh_channel = await bot.fetch_channel(channel_id)
+                task_description = getattr(fresh_channel, 'status', None) # status 속성이 없으면 None 반환
+            except Exception as e:
+                await message.channel.send(f"채널 정보를 가져오는 중 오류가 발생했어요: {e}")
+                return
+
+            if not task_description:
+                await message.channel.send(f"음... 😅 '{fresh_channel.name}' 채널의 상태 메시지가 비어있어요. 먼저 채널 상태를 설정해주세요!")
+                return
+
+            text_channel = discord.utils.get(guild.text_channels, name=config.TEXT_CHANNEL_NAME)
+            if not text_channel:
+                await message.channel.send(f"오류: 서버에서 '{config.TEXT_CHANNEL_NAME}' 채널을 찾을 수 없습니다.")
+                return
+
+            announcement = f"{member.mention} 님이 '**{task_description}**' 집중 타임을 오픈했습니다! 함께 달려보세요!"
+            await text_channel.send(announcement)
+            await message.channel.send(f"🔥 좋아요! '**{task_description}**' 집중 타임 시작을 모두에게 알렸어요. 파이팅! 💪")
+
+        # Case 2: !집중 [내용] (수동 입력)
+        elif command_content.startswith('!집중 '):
+            task_description = command_content.replace('!집중', '', 1).strip()
+            if not task_description:
+                await message.channel.send("앗, 어떤 일에 집중할지 알려주세요!")
+                return
+            
+            text_channel = discord.utils.get(guild.text_channels, name=config.TEXT_CHANNEL_NAME)
+            if not text_channel:
+                await message.channel.send(f"오류: 서버에서 '{config.TEXT_CHANNEL_NAME}' 채널을 찾을 수 없습니다.")
+                return
+
+            announcement = f"{message.author.mention} 님이 '**{task_description}**' 집중 타임을 오픈했습니다! 함께 달려보세요!"
+            await text_channel.send(announcement)
+            await message.channel.send(f"🔥 좋아요! '**{task_description}**' 집중 타임 시작을 모두에게 알렸어요. 파이팅! 💪")
+
+# --- Bot Commands ---
+@bot.command(name="현황")
+async def weekly_check_command(ctx):
+    await ctx.send("이번 주 출석 현황을 집계 중입니다... 🗓️")
+    report_message = await build_manual_weekly_check_report(ctx.guild, datetime.now(KST).date())
+    await ctx.send(report_message)
+
+@bot.command(name="월간결산")
+async def monthly_check_command(ctx, month: int = None):
+    now = datetime.now(KST)
+    year = now.year
+    if month is None:
+        target_date = now.date() - timedelta(days=now.day)
+        month = target_date.month
+    if not (1 <= month <= 12):
+        await ctx.send("올바른 월(1-12)을 입력해주세요.")
+        return
+    await ctx.send(f"**{year}년 {month}월** 최종 결산 내역을 불러오는 중... 🏆")
+    report_message = await build_monthly_final_report(ctx.guild, year, month)
+    await ctx.send(report_message)
+
+# --- [NEW] 진단 명령어 (유지) ---
+@bot.command(name="진단")
+async def diagnose(ctx):
+    import discord
+    import sys
+    version_info = f"🐍 Python: {sys.version.split()[0]}\n🤖 discord.py: {discord.__version__}"
+    status_check = ""
+    if ctx.author.voice and ctx.author.voice.channel:
+        channel = ctx.author.voice.channel
+        # 진단에서도 fetch를 시도해서 비교해줍니다.
+        try:
+            fresh_channel = await bot.fetch_channel(channel.id)
+            val = getattr(fresh_channel, 'status', 'None')
+            status_check = f"\n✅ '{channel.name}' 상태 (새로고침): {val}"
+        except:
+            status_check = "\n⚠️ 채널 정보 새로고침 실패"
+    else:
+        status_check = "\n⚠️ 음성 채널에 입장 후 다시 시도해주세요."
+    await ctx.send(f"```{version_info}{status_check}```")
+
+# --- Scheduled Tasks ---
 @tasks.loop(minutes=5)
 async def main_scheduler():
     await bot.wait_until_ready()
@@ -248,154 +405,6 @@ async def main_scheduler():
         final_message = f"\n---\n*{month}월의 모든 출석 데이터가 초기화됩니다. {now.month}월에도 함께 달려요!*"
         await channel.send(final_message)
         print(f"[{now}] {month}월 데이터 삭제 완료")
-
-# --- Bot Events ---
-@bot.event
-async def on_ready():
-    await init_db()
-    main_scheduler.start() # 이제 main_scheduler가 정의되어 있으므로 에러가 나지 않습니다.
-    print(f'{bot.user}으로 로그인 성공!')
-    print("메인 스케줄러가 시작되었습니다.")
-
-@bot.event
-async def on_voice_state_update(member, before, after):
-    if member.bot: return
-    text_channel = discord.utils.get(member.guild.text_channels, name=config.TEXT_CHANNEL_NAME)
-    if not text_channel: return
-    
-    is_join = (before.channel is None or before.channel.name != config.VOICE_CHANNEL_NAME) and \
-              (after.channel is not None and after.channel.name == config.VOICE_CHANNEL_NAME)
-    is_leave = (before.channel is not None and before.channel.name == config.VOICE_CHANNEL_NAME) and \
-               (after.channel is None or after.channel.name != config.VOICE_CHANNEL_NAME)
-
-    async with aiosqlite.connect(config.DATABASE_NAME) as db:
-        if is_join:
-            cursor = await db.execute("SELECT check_in FROM active_sessions WHERE user_id = ?", (str(member.id),))
-            if await cursor.fetchone() is None:
-                check_in_time = datetime.now(KST)
-                await db.execute("INSERT INTO active_sessions (user_id, check_in) VALUES (?, ?)", (str(member.id), check_in_time.isoformat()))
-                await db.commit()
-                print(f"{member.display_name}님이 '{config.VOICE_CHANNEL_NAME}' 채널에 입장.")
-                await text_channel.send(f"{member.mention}님, 작업 시작! 🔥")
-        elif is_leave:
-            cursor = await db.execute("SELECT check_in FROM active_sessions WHERE user_id = ?", (str(member.id),))
-            row = await cursor.fetchone()
-            if row:
-                check_in_time = datetime.fromisoformat(row[0])
-                check_out_time = datetime.now(KST)
-                await db.execute("DELETE FROM active_sessions WHERE user_id = ?", (str(member.id),))
-                sessions_to_insert = split_session_by_day(check_in_time, check_out_time)
-                for session in sessions_to_insert:
-                    await db.execute("INSERT INTO attendance (user_id, check_in, check_out, duration, check_in_date) VALUES (?, ?, ?, ?, ?)",
-                                     (str(member.id), session["check_in"], session["check_out"], session["duration"], datetime.fromisoformat(session["check_in"]).date().isoformat()))
-                await db.commit()
-                print(f"{member.display_name}님이 '{config.VOICE_CHANNEL_NAME}' 채널에서 퇴장.")
-                involved_dates = sorted(list(set([datetime.fromisoformat(s["check_in"]).date() for s in sessions_to_insert])))
-                time_report_parts = []
-                for report_date in involved_dates:
-                    total_seconds = await get_today_total_duration(db, str(member.id), report_date.isoformat())
-                    hours, remainder = divmod(total_seconds, 3600)
-                    minutes, _ = divmod(remainder, 60)
-                    time_report_parts.append(f"> {report_date.day}일 총 작업 시간: {int(hours):02d}시간 {int(minutes):02d}분")
-                time_report_message = "\n".join(time_report_parts)
-                await text_channel.send(f"{member.mention}님 수고하셨습니다! 👏\n{time_report_message}")
-
-@bot.event
-async def on_message(message):
-    if message.author.bot or not isinstance(message.channel, discord.DMChannel):
-        if not isinstance(message.channel, discord.DMChannel) and not message.author.bot:
-            await bot.process_commands(message)
-        return
-
-    if message.content.startswith('!집중'):
-        command_content = message.content.strip()
-        
-        guild = bot.guilds[0] if bot.guilds else None
-        if not guild:
-            await message.channel.send("오류: 봇이 속한 서버를 찾을 수 없습니다.")
-            return
-        
-        member = guild.get_member(message.author.id)
-        if not member:
-            await message.channel.send("오류: 서버에서 사용자님을 찾을 수 없습니다.")
-            return
-
-        text_channel = discord.utils.get(guild.text_channels, name=config.TEXT_CHANNEL_NAME)
-        if not text_channel:
-            await message.channel.send(f"오류: 서버에서 '{config.TEXT_CHANNEL_NAME}' 채널을 찾을 수 없습니다.")
-            return
-
-        # Case 1: !집중 (자동 불러오기)
-        if command_content == '!집중':
-            if not member.voice or not member.voice.channel or member.voice.channel.name != config.VOICE_CHANNEL_NAME:
-                await message.channel.send(f"앗! '{config.VOICE_CHANNEL_NAME}' 음성 채널에 먼저 입장하셔야 `!집중` 명령어를 사용할 수 있어요. 😮")
-                return
-            
-            try:
-                task_description = member.voice.channel.status
-            except AttributeError:
-                await message.channel.send(f"⚠️ 환경 오류: discord.py 버전({discord.__version__})이 낮아 상태를 가져올 수 없습니다.")
-                return
-            except Exception as e:
-                await message.channel.send(f"오류 발생: {e}")
-                return
-
-            if not task_description:
-                await message.channel.send("음... 😅 음성 채널의 상태 메시지가 비어있어요.")
-                return
-
-            announcement = f"{member.mention} 님이 '**{task_description}**' 집중 타임을 오픈했습니다! 함께 달려보세요!"
-            await text_channel.send(announcement)
-            await message.channel.send(f"🔥 좋아요! '**{task_description}**' 집중 타임 시작을 모두에게 알렸어요. 파이팅! 💪")
-
-        # Case 2: !집중 [내용] (수동 입력)
-        elif command_content.startswith('!집중 '):
-            task_description = command_content.replace('!집중', '', 1).strip()
-            if not task_description:
-                await message.channel.send("앗, 어떤 일에 집중할지 알려주세요!")
-                return
-            
-            announcement = f"{message.author.mention} 님이 '**{task_description}**' 집중 타임을 오픈했습니다! 함께 달려보세요!"
-            await text_channel.send(announcement)
-            await message.channel.send(f"🔥 좋아요! '**{task_description}**' 집중 타임 시작을 모두에게 알렸어요. 파이팅! 💪")
-
-# --- Bot Commands ---
-@bot.command(name="현황")
-async def weekly_check_command(ctx):
-    await ctx.send("이번 주 출석 현황을 집계 중입니다... 🗓️")
-    report_message = await build_manual_weekly_check_report(ctx.guild, datetime.now(KST).date())
-    await ctx.send(report_message)
-
-@bot.command(name="월간결산")
-async def monthly_check_command(ctx, month: int = None):
-    now = datetime.now(KST)
-    year = now.year
-    if month is None:
-        target_date = now.date() - timedelta(days=now.day)
-        month = target_date.month
-    if not (1 <= month <= 12):
-        await ctx.send("올바른 월(1-12)을 입력해주세요.")
-        return
-    await ctx.send(f"**{year}년 {month}월** 최종 결산 내역을 불러오는 중... 🏆")
-    report_message = await build_monthly_final_report(ctx.guild, year, month)
-    await ctx.send(report_message)
-
-# --- [NEW] 진단 명령어 ---
-@bot.command(name="진단")
-async def diagnose(ctx):
-    import discord
-    import sys
-    version_info = f"🐍 Python: {sys.version.split()[0]}\n🤖 discord.py: {discord.__version__}"
-    status_check = ""
-    if ctx.author.voice and ctx.author.voice.channel:
-        channel = ctx.author.voice.channel
-        if 'status' in dir(channel):
-            status_check = f"\n✅ '{channel.name}' 채널에 'status' 속성 존재함 (값: {getattr(channel, 'status', 'None')})"
-        else:
-            status_check = f"\n❌ '{channel.name}' 채널에 'status' 속성 없음"
-    else:
-        status_check = "\n⚠️ 음성 채널에 입장 후 다시 시도해주세요."
-    await ctx.send(f"```{version_info}{status_check}```")
 
 # --- Run Bot ---
 if __name__ == "__main__":
