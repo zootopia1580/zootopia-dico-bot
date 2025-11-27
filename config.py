@@ -3,9 +3,12 @@
 # --- Discord Bot Settings ---
 BOT_PREFIX = "!"
 
-# --- Channel Settings ---
-VOICE_CHANNEL_NAME = "고독한작업방"
-TEXT_CHANNEL_NAME = "출석체크"
+# --- Channel Settings (ID 기반) ---
+# 고독한작업방 ID
+VOICE_CHANNEL_ID = 1339546362794086450
+
+# 출석체크 채팅방 ID
+TEXT_CHANNEL_ID = 1339546362567725081
 
 # --- Attendance Rules ---
 DAILY_GOAL_SECONDS = 7200  # 하루 목표 시간 (2시간)
@@ -21,14 +24,12 @@ SPECIAL_USER_GOALS = {
 DATABASE_NAME = "/data/attendance.db"
 
 # --- Presentation Settings ---
-# 출석 상태 아이콘 정의
 STATUS_ICONS = {
-    "pass": "✅",         # 목표 달성
-    "insufficient": "⚠️", # 시간 모자람
-    "absent": "❌",       # 접속 안함
+    "pass": "✅",
+    "insufficient": "⚠️",
+    "absent": "❌",
 }
 
-# 자동 알림 메시지 제목
 MESSAGE_HEADINGS = {
     "weekly_mid_check": "[🔥 주중 파이팅] {month}월 {week}주차 중간 점검",
     "weekly_final": "[✅ 주간 결산] {month}월 {week}주차 결과 확정",
