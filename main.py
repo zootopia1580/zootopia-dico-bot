@@ -1,7 +1,7 @@
 # main.py
 
 """
-디스코드 음성 채널 출석 체크 봇 (ID 기반 + 상태 텍스트 감지)
+디스코드 음성 채널 출석 체크 봇 (Raw Data 진단 기능 포함)
 """
 
 import os
@@ -13,8 +13,9 @@ from datetime import datetime, timedelta, time, timezone
 from collections import defaultdict
 import calendar
 import sys 
+import json # 원본 데이터 분석용
 
-print("★★★★★ 봇 실행! (상태 텍스트 감지 버전) ★★★★★★")
+print("★★★★★ 봇 실행! (CSI 데이터 정밀 분석 모드) ★★★★★★")
 
 import config
 
@@ -32,7 +33,7 @@ intents.guilds = True
 bot = commands.Bot(command_prefix=config.BOT_PREFIX, intents=intents)
 last_task_run = defaultdict(lambda: None)
 
-# --- Database Functions (변경 없음) ---
+# --- Database Functions (기존 동일) ---
 async def init_db():
     async with aiosqlite.connect(config.DATABASE_NAME) as db:
         await db.execute("CREATE TABLE IF NOT EXISTS attendance (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, check_in TEXT, check_out TEXT, duration INTEGER, check_in_date TEXT)")
@@ -94,7 +95,7 @@ async def build_weekly_mid_report(guild, date):
                 body.append(f"`{status_line}` {member.mention}")
     body.append(f"\n> (✅: 달성, ⚠️: 모자람, ❌: 안 들어옴)\n\n아직 시간이 충분해요. 모두 목표를 향해 달려봐요! 🚀")
     return "\n".join([header] + body)
-
+    
 async def build_manual_weekly_check_report(guild, date):
     week_start = date - timedelta(days=date.weekday())
     num_days = date.weekday() + 1
@@ -140,23 +141,20 @@ async def build_monthly_final_report(guild, year, month):
 @bot.event
 async def on_ready():
     await init_db()
-    # main_scheduler.start() # 스케줄러 필요시 주석 해제
+    main_scheduler.start()
     print(f'✅ {bot.user} 로그인 성공!')
 
-# ★★★ [핵심 1] 음성 채널 상태 텍스트 감지 ★★★
+# ★★★ [핵심 1] 음성 채널 상태 변경 감지 (ID 사용) ★★★
 @bot.event
 async def on_voice_channel_status_update(channel, before, after):
-    # ID 확인
     if channel.id != config.VOICE_CHANNEL_ID:
         return
 
-    # 텍스트 채널 확인
     text_channel = channel.guild.get_channel(config.TEXT_CHANNEL_ID)
     if not text_channel:
         return
 
-    # after 변수에는 변경된 '상태 텍스트'가 들어옵니다. (예: "테스트")
-    # 상태가 비어있지 않을 때만 공지
+    # after는 변경된 상태 텍스트(문자열)입니다.
     if after:
         editor = None
         try:
@@ -172,7 +170,7 @@ async def on_voice_channel_status_update(channel, before, after):
         else:
             await text_channel.send(f"📢 누군가 '**{after}**' 집중 타임을 오픈했습니다! 함께 달려보세요! 🔥")
 
-# ★★★ [핵심 2] 출석 체크 ★★★
+# ★★★ [핵심 2] 출석 체크 (ID 사용) ★★★
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.bot: return
@@ -194,7 +192,6 @@ async def on_voice_state_update(member, before, after):
                 await db.execute("INSERT INTO active_sessions (user_id, check_in) VALUES (?, ?)", (str(member.id), now.isoformat()))
                 await db.commit()
                 await text_channel.send(f"{member.mention}님, 작업 시작! 🔥")
-        
         elif is_leave:
             cursor = await db.execute("SELECT check_in FROM active_sessions WHERE user_id = ?", (str(member.id),))
             row = await cursor.fetchone()
@@ -211,68 +208,172 @@ async def on_voice_state_update(member, before, after):
                 m, _ = divmod(r, 60)
                 await text_channel.send(f"{member.mention}님 수고하셨습니다! (오늘: {int(h)}시간 {int(m)}분)")
 
-# ★★★ [핵심 3] 수동 명령 (!집중) ★★★
+# ★★★ [핵심 3] 수동 명령 및 진단 ★★★
 @bot.event
 async def on_message(message):
     if message.author.bot: return
     
     if isinstance(message.channel, discord.DMChannel):
         if message.content.strip() == '!집중':
-            # 봇이 있는 서버 찾기
             if not bot.guilds: return
             guild = bot.guilds[0]
-            
-            # 텍스트 채널 찾기
             text_channel = guild.get_channel(config.TEXT_CHANNEL_ID)
-            if not text_channel:
-                await message.channel.send("오류: 채팅방을 찾을 수 없습니다.")
-                return
-
-            # 음성 채널 정보 가져오기 (ID 사용)
+            
             try:
+                # 1. 라이브러리 방식 시도
                 target_channel = await bot.fetch_channel(config.VOICE_CHANNEL_ID)
-                # 여기서 status를 가져옵니다. ("테스트" 같은 텍스트)
-                status_text = getattr(target_channel, 'status', None)
+                status = getattr(target_channel, 'status', None)
                 
-                if status_text:
-                    # 채팅방 공지
-                    member = guild.get_member(message.author.id)
-                    await text_channel.send(f"{member.mention} 님이 '**{status_text}**' 집중 타임을 오픈했습니다! 함께 달려보세요!")
-                    await message.channel.send(f"🔥 알림 전송 완료: {status_text}")
-                else:
-                    await message.channel.send(f"음성 채널 상태가 비어있습니다. '{target_channel.name}' 채널 상태를 먼저 설정해주세요.")
-            except Exception as e:
-                await message.channel.send(f"오류 발생: {e}")
+                # 2. 실패 시 원본 데이터(Raw API) 조회 시도
+                if not status:
+                    raw_data = await bot.http.request(discord.http.Route('GET', f'/channels/{config.VOICE_CHANNEL_ID}'))
+                    status = raw_data.get('status')
 
+                if status:
+                    member = guild.get_member(message.author.id)
+                    await text_channel.send(f"{member.mention} 님이 '**{status}**' 집중 타임을 오픈했습니다! 함께 달려보세요!")
+                    await message.channel.send(f"🔥 알림 전송 완료: {status}")
+                else:
+                    await message.channel.send("음성 채널 상태가 비어있거나 읽어올 수 없습니다. `!집중 [내용]`을 사용해주세요.")
+            except Exception as e:
+                await message.channel.send(f"오류: {e}")
+
+        elif message.content.startswith('!집중 '):
+            content = message.content.replace('!집중', '').strip()
+            guild = bot.guilds[0] if bot.guilds else None
+            text_channel = guild.get_channel(config.TEXT_CHANNEL_ID) if guild else None
+            if text_channel:
+                member = guild.get_member(message.author.id)
+                await text_channel.send(f"📢 {member.mention}님이 '**{content}**' 집중 타임을 오픈했습니다! 함께 달려보세요! 🔥")
+                await message.channel.send("✅ 전송 완료")
+    
     else:
         await bot.process_commands(message)
 
-# --- [NEW] 수정된 진단 명령어 ---
+# --- Bot Commands ---
+@bot.command(name="현황")
+async def weekly_check_command(ctx):
+    await ctx.send("이번 주 출석 현황을 집계 중입니다... 🗓️")
+    report_message = await build_manual_weekly_check_report(ctx.guild, datetime.now(KST).date())
+    await ctx.send(report_message)
+
+@bot.command(name="월간결산")
+async def monthly_check_command(ctx, month: int = None):
+    now = datetime.now(KST)
+    year = now.year
+    if month is None:
+        target_date = now.date() - timedelta(days=now.day)
+        month = target_date.month
+    if not (1 <= month <= 12):
+        await ctx.send("올바른 월(1-12)을 입력해주세요.")
+        return
+    await ctx.send(f"**{year}년 {month}월** 최종 결산 내역을 불러오는 중... 🏆")
+    report_message = await build_monthly_final_report(ctx.guild, year, month)
+    await ctx.send(report_message)
+
+# [NEW] 정밀 진단 명령어
 @bot.command(name="진단")
 async def diagnose(ctx):
     import discord
     import sys
-    version_info = f"🐍 Python: {sys.version.split()[0]}\n🤖 discord.py: {discord.__version__}"
     
-    # ID로 채널 확인
+    msg = f"🐍 Python: {sys.version.split()[0]}\n🤖 discord.py: {discord.__version__}\n"
+    
+    # 1. 일반적인 방법으로 속성 확인
     try:
         target_vc = await bot.fetch_channel(config.VOICE_CHANNEL_ID)
-        target_tc = await bot.fetch_channel(config.TEXT_CHANNEL_ID)
-        
-        # ★ 여기가 수정되었습니다: status 값을 직접 출력합니다 ★
-        current_status = getattr(target_vc, 'status', '없음(None)')
-        
-        msg = f"""
-[채널 연결 상태]
-음성방 이름: {target_vc.name}
-음성방 상태(Status): {current_status}  <-- 여기에 '테스트'가 나와야 합니다!
-채팅방 이름: {target_tc.name}
-"""
+        msg += f"\n[일반 조회]\n이름: {target_vc.name}\nstatus 속성값: {getattr(target_vc, 'status', '속성 없음')}"
     except Exception as e:
-        msg = f"\n❌ 채널 정보 조회 실패: {e}"
+        msg += f"\n[일반 조회 실패] {e}"
 
-    await ctx.send(f"```{version_info}{msg}```")
+    # 2. 디스코드 원본 데이터(JSON) 직접 확인 (가장 중요)
+    try:
+        raw_data = await bot.http.request(discord.http.Route('GET', f'/channels/{config.VOICE_CHANNEL_ID}'))
+        msg += f"\n\n[원본 데이터 분석]\nstatus 키 존재 여부: {'status' in raw_data}"
+        if 'status' in raw_data:
+            msg += f"\n원본 status 값: '{raw_data['status']}'"
+        else:
+            msg += "\n(원본 데이터에 status 항목이 아예 없습니다. 디스코드가 안 보내주는 중)"
+            # 혹시 몰라 모든 키 출력
+            msg += f"\n전체 키 목록: {list(raw_data.keys())}"
+    except Exception as e:
+        msg += f"\n[원본 데이터 조회 실패] {e}"
+
+    # 긴 메시지 전송을 위해 나눠서 보낼 수도 있음 (여기선 그냥 보냄)
+    if len(msg) > 1900:
+        msg = msg[:1900] + "..."
+    await ctx.send(f"```yaml\n{msg}```")
+
+# --- Scheduled Tasks ---
+@tasks.loop(minutes=5)
+async def main_scheduler():
+    await bot.wait_until_ready()
+    now = datetime.now(KST)
+    today_str = now.date().isoformat()
+    guild = bot.guilds[0] if bot.guilds else None
+    if not guild: return
+    channel = guild.get_channel(config.TEXT_CHANNEL_ID)
+    if not channel: return
+
+    if now.weekday() == 3 and now.hour == 18 and last_task_run["weekly_mid"] != today_str:
+        last_task_run["weekly_mid"] = today_str
+        await channel.send(await build_weekly_mid_report(guild, now.date()))
+
+    if now.weekday() == 0 and now.hour == 0 and now.minute >= 5 and last_task_run["weekly_final"] != today_str:
+        last_task_run["weekly_final"] = today_str
+        last_sunday = now.date() - timedelta(days=1)
+        week_start = last_sunday - timedelta(days=6)
+        dates = [week_start + timedelta(days=i) for i in range(7)]
+        header = config.MESSAGE_HEADINGS["weekly_final"].format(month=last_sunday.month, week=get_week_of_month(last_sunday))
+        body = ["지난 한 주 모두 고생 많으셨습니다. 최종 출석 결과입니다.", "`월 화 수 목 금 토 일`"]
+        async with aiosqlite.connect(config.DATABASE_NAME) as db:
+            users = await get_all_users_for_month(db, last_sunday.year, last_sunday.month)
+            successful_weeks_by_user = defaultdict(int)
+            for user_id in users:
+                for week in calendar.monthcalendar(last_sunday.year, last_sunday.month):
+                    week_dates = [datetime(last_sunday.year, last_sunday.month, day).date() for day in week if day != 0 and datetime(last_sunday.year, last_sunday.month, day).date() <= last_sunday]
+                    if not week_dates: continue
+                    _, w_pass_days = await generate_weekly_status_line(db, user_id, week_dates)
+                    if w_pass_days >= config.WEEKLY_GOAL_DAYS: successful_weeks_by_user[user_id] += 1
+            for user_id in users:
+                member = guild.get_member(int(user_id))
+                if member:
+                    status_line, pass_days = await generate_weekly_status_line(db, user_id, dates)
+                    result = "달성! 🎉" if pass_days >= config.WEEKLY_GOAL_DAYS else "미달성 😥"
+                    body.append(f"`{status_line}` {member.mention}   **{result}** (월간: {successful_weeks_by_user.get(user_id, 0)}주 성공)")
+        body.append("\n새로운 한 주도 함께 파이팅입니다!")
+        await channel.send("\n".join([header] + body))
+        if get_week_of_month(last_sunday) == 3:
+            header = config.MESSAGE_HEADINGS["monthly_mid_check"].format(month=last_sunday.month)
+            mid_body = [f"벌써 마지막 주네요! {last_sunday.month}월 사용료 면제 현황을 알려드립니다."]
+            for user_id in users:
+                weeks = successful_weeks_by_user.get(user_id, 0)
+                member = guild.get_member(int(user_id))
+                if member:
+                    if weeks >= config.MONTHLY_GOAL_WEEKS: status = "사용료 면제 확정! 🥳"
+                    elif weeks == config.MONTHLY_GOAL_WEEKS - 1: status = "마지막 주 목표 달성 시 면제 가능! 🔥"
+                    else: status = "면제는 어려워졌지만, 남은 한 주도 파이팅! 💪"
+                    mid_body.append(f"{member.mention}: 현재 **{weeks}주** 성공 - **{status}**")
+            await channel.send("\n".join([header] + mid_body))
+
+    if now.day == 1 and now.hour == 1 and last_task_run["monthly_final"] != today_str:
+        last_task_run["monthly_final"] = today_str
+        target_date = now.date() - timedelta(days=1)
+        year, month = target_date.year, target_date.month
+        report_message = await build_monthly_final_report(guild, year, month)
+        await channel.send(report_message)
+        
+        async with aiosqlite.connect(config.DATABASE_NAME) as db:
+            await db.execute("DELETE FROM attendance WHERE check_in_date < ?", (now.date().replace(day=1).isoformat(),))
+            await db.commit()
+        
+        final_message = f"\n---\n*{month}월의 모든 출석 데이터가 초기화됩니다. {now.month}월에도 함께 달려요!*"
+        await channel.send(final_message)
+        print(f"[{now}] {month}월 데이터 삭제 완료")
 
 # --- Run Bot ---
 if __name__ == "__main__":
-    bot.run(TOKEN)
+    if TOKEN:
+        bot.run(TOKEN)
+    else:
+        print("에러: DISCORD_BOT_TOKEN이 설정되지 않았습니다. .env 파일을 확인해주세요.")
