@@ -289,7 +289,6 @@ async def on_ready():
             cur = await db.execute("SELECT user_id, check_in FROM active_sessions")
             db_sessions = {row[0]: row[1] for row in await cur.fetchall()}
 
-            # DB에 있는데 채널에 없음 → 봇 재시작 시간으로 퇴장 처리
             for uid in list(db_sessions.keys()):
                 if uid not in current_members:
                     check_out = datetime.now(KST)
@@ -297,7 +296,6 @@ async def on_ready():
                     await db.execute("DELETE FROM active_sessions WHERE user_id=?", (uid,))
                     print(f"오프라인 중 퇴장 처리: {uid}")
 
-            # 채널에 있는데 DB에 없음 → 새로 체크인
             for uid in current_members:
                 if uid not in db_sessions:
                     now = datetime.now(KST)
@@ -306,8 +304,6 @@ async def on_ready():
                         (uid, now.isoformat())
                     )
                     print(f"신규 세션 시작: {uid}")
-
-            # 양쪽 다 있음 → 원래 체크인 시간 유지 (아무것도 안 함)
 
             await db.commit()
 
@@ -331,8 +327,8 @@ async def on_voice_state_update(member, before, after):
         and (not after.channel or after.channel.id != target_id)
     )
 
-    async with aiosqlite.connect(config.DATABASE_NAME) as db:
-        if is_join:
+    if is_join:
+        async with aiosqlite.connect(config.DATABASE_NAME) as db:
             cur = await db.execute(
                 "SELECT check_in FROM active_sessions WHERE user_id=?", (str(member.id),)
             )
@@ -344,16 +340,17 @@ async def on_voice_state_update(member, before, after):
                 )
                 await db.commit()
 
-                msg = get_join_message(member, now.hour)
-                await text_channel.send(msg)
+        msg = get_join_message(member, datetime.now(KST).hour)
+        await text_channel.send(msg)
 
-                voice_channel = member.guild.get_channel(target_id)
-                if voice_channel:
-                    count = len([m for m in voice_channel.members if not m.bot])
-                    if count in config.HEADCOUNT_MESSAGES:
-                        await text_channel.send(config.HEADCOUNT_MESSAGES[count])
+        voice_channel = member.guild.get_channel(target_id)
+        if voice_channel:
+            count = len([m for m in voice_channel.members if not m.bot])
+            if count in config.HEADCOUNT_MESSAGES:
+                await text_channel.send(config.HEADCOUNT_MESSAGES[count])
 
-        elif is_leave:
+    elif is_leave:
+        async with aiosqlite.connect(config.DATABASE_NAME) as db:
             cur = await db.execute(
                 "SELECT check_in FROM active_sessions WHERE user_id=?", (str(member.id),)
             )
@@ -366,28 +363,30 @@ async def on_voice_state_update(member, before, after):
                 )
                 await db.commit()
 
-                today_str = check_out.date().isoformat()
-                today_total = await get_duration_sum(db, str(member.id), today_str)
-                week_dates = get_week_dates(check_out.date())
-                week_total = await get_week_duration(db, str(member.id), week_dates)
-                emoji, label = config.get_weekly_tier(week_total)
+        # ★ 커밋 후 새 커넥션으로 읽기 ★
+        async with aiosqlite.connect(config.DATABASE_NAME) as db2:
+            today_str = check_out.date().isoformat()
+            today_total = await get_duration_sum(db2, str(member.id), today_str)
+            week_dates = get_week_dates(check_out.date())
+            week_total = await get_week_duration(db2, str(member.id), week_dates)
 
-                involved_dates = sorted(set(
-                    datetime.fromisoformat(s["check_in"]).date() for s in split_sessions
-                ))
+            involved_dates = sorted(set(
+                datetime.fromisoformat(s["check_in"]).date() for s in split_sessions
+            ))
 
-                leave_msg = get_leave_message(member, check_out.hour)
-                msg_lines = [leave_msg]
+            emoji, label = config.get_weekly_tier(week_total)
+            leave_msg = get_leave_message(member, check_out.hour)
+            msg_lines = [leave_msg]
 
-                if len(involved_dates) > 1:
-                    for d in involved_dates:
-                        day_total = await get_duration_sum(db, str(member.id), d.isoformat())
-                        msg_lines.append(f"> {d.month}/{d.day}: {fmt_time(day_total)}")
-                else:
-                    msg_lines.append(f"> 오늘: {fmt_time(today_total)}")
+            if len(involved_dates) > 1:
+                for d in involved_dates:
+                    day_total = await get_duration_sum(db2, str(member.id), d.isoformat())
+                    msg_lines.append(f"> {d.month}/{d.day}: {fmt_time(day_total)}")
+            else:
+                msg_lines.append(f"> 오늘: {fmt_time(today_total)}")
 
-                msg_lines.append(f"> 이번 주 누적: {fmt_time(week_total)} {emoji} {label}")
-                await text_channel.send("\n".join(msg_lines))
+            msg_lines.append(f"> 이번 주 누적: {fmt_time(week_total)} {emoji} {label}")
+            await text_channel.send("\n".join(msg_lines))
 
 
 # ──────────────────────────────────────────
@@ -435,7 +434,6 @@ async def main_scheduler():
 
     text_channel = guild.get_channel(config.TEXT_CHANNEL_ID)
 
-    # 주간 결산: 매주 월요일 오전 9시
     if now.weekday() == 0 and now.hour == 9 and now.minute == 0 and last_task_run["weekly"] != today_str:
         last_task_run["weekly"] = today_str
         last_monday = now.date() - timedelta(days=7)
@@ -444,7 +442,6 @@ async def main_scheduler():
         if text_channel:
             await text_channel.send(embed=embed)
 
-    # 월간 결산: 매월 1일 오전 9시
     if now.day == 1 and now.hour == 9 and now.minute == 0 and last_task_run["monthly"] != today_str:
         last_task_run["monthly"] = today_str
         last_month = now.date().replace(day=1) - timedelta(days=1)
