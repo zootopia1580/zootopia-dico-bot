@@ -1,61 +1,61 @@
-# config.py
+import os
 
 # --- Discord Bot Settings ---
 BOT_PREFIX = "!"
 
-# --- Channel Settings (ID 기반) ---
-# 고독한작업방 ID
-VOICE_CHANNEL_ID = 1339546362794086450
-
-# 출석체크 채팅방 ID (입/퇴장 알림, 주간 리포트용)
-TEXT_CHANNEL_ID = 1339546362567725081
-
-# [NEW] 공지 채널 ID (주간 목표 공지, 월간 최종 정산용)
+# --- Channel Settings ---
+VOICE_CHANNEL_ID  = 1339546362794086450
+TEXT_CHANNEL_ID   = 1339546362567725081
 NOTICE_CHANNEL_ID = 1339546362567725084
 
-# --- Attendance Rules ---
-DAILY_GOAL_SECONDS = 7200  # 기본 2시간
-WEEKLY_GOAL_DAYS = 4       # 4일
-MONTHLY_GOAL_WEEKS = 3     # 3주
-
-# --- User Groups & Goals ---
-USER_GROUPS = {
-    "🔥 취준이 (일 4시간)": {
-        "goal_seconds": 14400,
-        "members": [
-            1339540906914746390, # 혜민
-            805463906620669972,  # 승주
-            1196364716147216415, # 수빈
-            967781976486608916,  # 지혜
-            900314845667295262,  # 지연
-            752488606353850408   # 서현
-        ]
-    },
-    "💼 이준이 (일 2시간)": {
-        "goal_seconds": 7200,
-        "members": [
-            1216225553686859788, # 다인
-            900000344602443857,  # 선빈
-            968492300642697237   # 성민
-        ]
-    }
-}
-
-def get_user_goal(user_id):
-    uid = int(user_id)
-    for group in USER_GROUPS.values():
-        if uid in group["members"]:
-            return group["goal_seconds"]
-    return DAILY_GOAL_SECONDS
-
-# --- Database Settings ---
+# --- Database ---
 DATABASE_NAME = "attendance.db"
 
-# --- Presentation Settings ---
-STATUS_ICONS = {"pass": "✅", "insufficient": "⚠️", "absent": "❌"}
-MESSAGE_HEADINGS = {
-    "weekly_mid_check": "[🔥 주중 파이팅] {month}월 {week}주차 중간 점검",
-    "weekly_final": "[✅ 주간 결산] {month}월 {week}주차 결과 확정",
-    "monthly_mid_check": "[🚨 월간 중간 정산] {month}월 사용료 면제까지 남은 조건!",
-    "monthly_final": "[🏆 월간 최종 정산] {month}월 결과 및 데이터 초기화",
+# --- 주간 시간 단계 ---
+WEEKLY_TIERS = [
+    (9*3600,  None,    "🏆", "레전드"),
+    (7*3600,  9*3600,  "💪", "거의 다 왔어"),
+    (5*3600,  7*3600,  "⚡", "달리는 중"),
+    (3*3600,  5*3600,  "🔥", "불붙었다"),
+    (1,       3*3600,  "🌱", "뭐라도 했잖아"),
+    (0,       1,       "⬜", "이번 주 쉬었나요"),
+]
+
+def get_weekly_tier(total_seconds):
+    for min_s, max_s, emoji, label in WEEKLY_TIERS:
+        if total_seconds >= min_s and (max_s is None or total_seconds < max_s):
+            return emoji, label
+    return "⬜", "이번 주 쉬었나요"
+
+# --- 입장 멘트 ---
+JOIN_MESSAGES_DEFAULT = [
+    "{mention} 님 입장! 🔥 다들 자극받으세요~",
+    "{mention} 님이 오셨습니다 👀 슬슬 자리 잡으실 분?",
+    "{mention} 님 작업 시작! 💪 같이 달리실 분 계신가요?",
+    "{mention} 님 등장 ✨ 오늘도 열심히 하실 것 같은 분위기인데요?",
+    "{mention} 님이 먼저 시작하셨네요 🏃 늦으시면 안 됩니다!",
+]
+
+JOIN_MESSAGES_EVENING = [
+    "{mention} 님 퇴근 후 바로 달리러 오셨어요 🔥 다들 보셨죠?",
+    "{mention} 님 칼퇴 후 즉시 입장 💨 자극 한 번 받아가세요~",
+    "{mention} 님 저녁에도 이러시면 다들 따라올 수밖에 없죠 👏",
+]
+
+JOIN_MESSAGES_NIGHT = [
+    "{mention} 님 새벽에도 오셨네요 🌙 이 분위기 다들 느끼시죠?",
+    "{mention} 님 지금 이 시간에 입장하시면 저도 자극받습니다 😤",
+    "{mention} 님 새벽 자기계발 스타트 🌙 같이 하실 분?",
+]
+
+# --- 인원수 이벤트 ---
+HEADCOUNT_MESSAGES = {
+    2: "어? 작업방에 2명이 모였어요 👀 혼자 계신 분들 슬슬 오실 타이밍!",
+    3: "작업방 3명 돌파 🔥 분위기 달아오르고 있어요~",
+    4: "벌써 4명이나 계시네요 💪 합류 안 하시면 손해예요!",
+    5: "작업방 절반 이상 모였습니다 ⚡ 이 에너지 느껴지시나요?",
+    6: "6명 입장 완료 🎯 슬슬 다 모이는 것 같은데요?",
+    7: "7명이나 계세요 🔥🔥 오늘 작업방 분위기 심상치 않습니다",
+    8: "8명 달성 👀 이제 한 명만 더!",
+    9: "🎉 전원 집합!! 오늘 이 순간 기억해두세요. 역대급입니다",
 }
