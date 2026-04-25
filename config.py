@@ -9,7 +9,7 @@ TEXT_CHANNEL_ID   = 1339546362567725081
 NOTICE_CHANNEL_ID = 1339546362567725084
 
 # --- Database ---
-DATABASE_NAME = "attendance.db"
+DATABASE_NAME = "data/attendance.db"
 
 # --- 주간 시간 단계 ---
 WEEKLY_TIERS = [
