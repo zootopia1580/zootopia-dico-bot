@@ -49,7 +49,7 @@ def get_user_goal(user_id):
     return DAILY_GOAL_SECONDS
 
 # --- Database Settings ---
-DATABASE_NAME = "/data/attendance.db"
+DATABASE_NAME = "attendance.db"
 
 # --- Presentation Settings ---
 STATUS_ICONS = {"pass": "✅", "insufficient": "⚠️", "absent": "❌"}
