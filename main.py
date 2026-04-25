@@ -152,6 +152,16 @@ def get_join_message(member, hour):
     return random.choice(pool).format(mention=member.mention)
 
 
+def get_leave_message(member, hour):
+    if 18 <= hour < 22:
+        pool = config.LEAVE_MESSAGES_EVENING
+    elif hour >= 22 or hour < 6:
+        pool = config.LEAVE_MESSAGES_NIGHT
+    else:
+        pool = config.LEAVE_MESSAGES_DEFAULT
+    return random.choice(pool).format(mention=member.mention)
+
+
 # ──────────────────────────────────────────
 # 주간 결산 임베드
 # ──────────────────────────────────────────
@@ -243,17 +253,14 @@ async def build_monthly_report(guild, year, month):
             medal = medals[i] if i < 3 else f"{i+1}위"
             lines.append(f"{medal} {member.display_name}   {fmt_time(total)}   {week_emojis}")
 
-        # MVP
         mvp = members_data[0][0]
         lines.append(f"\n🏆 **이달의 MVP**   {mvp.mention} ({fmt_time(members_data[0][1])})")
 
-        # 개근상: 모든 주에 기록 있는 사람
         for member, total, week_emojis in members_data:
             if "⬜" not in week_emojis:
                 lines.append(f"🔥 **개근상**   {member.mention} (한 주도 빠지지 않음!)")
                 break
 
-        # 꼴찌 응원
         if len(members_data) > 1:
             last = members_data[-1][0]
             lines.append(f"📈 **다음 달엔 더 달려봐요**   {last.mention} 💪")
@@ -271,22 +278,18 @@ async def on_ready():
     main_scheduler.start()
     print(f"✅ {bot.user} 로그인 성공!")
 
-    # 재시작 시 세션 복구
     for guild in bot.guilds:
         voice_channel = guild.get_channel(config.VOICE_CHANNEL_ID)
         if not voice_channel:
             continue
 
         async with aiosqlite.connect(config.DATABASE_NAME) as db:
-            # 현재 채널에 있는 멤버
             current_members = {str(m.id) for m in voice_channel.members if not m.bot}
 
-            # DB에 남아있는 세션
             cur = await db.execute("SELECT user_id, check_in FROM active_sessions")
             db_sessions = {row[0]: row[1] for row in await cur.fetchall()}
 
-            # 케이스 1: DB에 있는데 지금 채널에 없음 → 봇 꺼진 사이 나간 것
-            # 봇 재시작 시간을 퇴장 시간으로 처리
+            # DB에 있는데 채널에 없음 → 봇 재시작 시간으로 퇴장 처리
             for uid in list(db_sessions.keys()):
                 if uid not in current_members:
                     check_out = datetime.now(KST)
@@ -294,7 +297,7 @@ async def on_ready():
                     await db.execute("DELETE FROM active_sessions WHERE user_id=?", (uid,))
                     print(f"오프라인 중 퇴장 처리: {uid}")
 
-            # 케이스 2: 지금 채널에 있는데 DB에 없음 → 새로 체크인
+            # 채널에 있는데 DB에 없음 → 새로 체크인
             for uid in current_members:
                 if uid not in db_sessions:
                     now = datetime.now(KST)
@@ -304,7 +307,7 @@ async def on_ready():
                     )
                     print(f"신규 세션 시작: {uid}")
 
-            # 케이스 3: 양쪽 다 있음 → 원래 체크인 시간 그대로 유지 (아무것도 안 함)
+            # 양쪽 다 있음 → 원래 체크인 시간 유지 (아무것도 안 함)
 
             await db.commit()
 
@@ -344,7 +347,6 @@ async def on_voice_state_update(member, before, after):
                 msg = get_join_message(member, now.hour)
                 await text_channel.send(msg)
 
-                # 인원수 이벤트
                 voice_channel = member.guild.get_channel(target_id)
                 if voice_channel:
                     count = len([m for m in voice_channel.members if not m.bot])
@@ -374,7 +376,9 @@ async def on_voice_state_update(member, before, after):
                     datetime.fromisoformat(s["check_in"]).date() for s in split_sessions
                 ))
 
-                msg_lines = [f"{member.mention} 님 오늘도 수고하셨어요 👏"]
+                leave_msg = get_leave_message(member, check_out.hour)
+                msg_lines = [leave_msg]
+
                 if len(involved_dates) > 1:
                     for d in involved_dates:
                         day_total = await get_duration_sum(db, str(member.id), d.isoformat())
@@ -448,7 +452,6 @@ async def main_scheduler():
         if text_channel:
             await text_channel.send(report)
 
-        # 지난 달 DB 초기화
         async with aiosqlite.connect(config.DATABASE_NAME) as db:
             start = f"{last_month.year}-{last_month.month:02d}-01"
             end = f"{last_month.year}-{last_month.month:02d}-{calendar.monthrange(last_month.year, last_month.month)[1]}"
