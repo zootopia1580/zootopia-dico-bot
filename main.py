@@ -82,6 +82,21 @@ def split_session_by_day(check_in, check_out):
     return sessions
 
 
+async def save_session(db, user_id, check_in_iso, check_out):
+    check_in = datetime.fromisoformat(check_in_iso)
+    split_sessions = split_session_by_day(check_in, check_out)
+    for s in split_sessions:
+        await db.execute(
+            "INSERT INTO attendance (user_id, check_in, check_out, duration, check_in_date) VALUES (?,?,?,?,?)",
+            (
+                user_id,
+                s["check_in"], s["check_out"], s["duration"],
+                datetime.fromisoformat(s["check_in"]).date().isoformat()
+            )
+        )
+    return split_sessions
+
+
 async def get_duration_sum(db, user_id, date_str):
     cur = await db.execute(
         "SELECT SUM(duration) FROM attendance WHERE user_id=? AND check_in_date=?",
@@ -138,10 +153,9 @@ def get_join_message(member, hour):
 
 
 # ──────────────────────────────────────────
-# 주간 결산 임베드 생성
+# 주간 결산 임베드
 # ──────────────────────────────────────────
 async def build_weekly_embed(guild, week_dates):
-    now = datetime.now(KST)
     month = week_dates[0].month
     week_num = (week_dates[0].day - 1) // 7 + 1
     title = f"📊 {month}월 {week_num}주차 주간 결산"
@@ -157,12 +171,10 @@ async def build_weekly_embed(guild, week_dates):
                 members_data.append((member, total))
 
         if not members_data:
-            embed = discord.Embed(title=title, description="이번 주 기록이 없어요 😅", color=0x5865F2)
-            return embed
+            return discord.Embed(title=title, description="이번 주 기록이 없어요 😅", color=0x5865F2)
 
         members_data.sort(key=lambda x: x[1], reverse=True)
 
-        # 그룹별 분류
         groups = defaultdict(list)
         for member, total in members_data:
             emoji, label = config.get_weekly_tier(total)
@@ -182,26 +194,24 @@ async def build_weekly_embed(guild, week_dates):
                     inline=False
                 )
 
-        # MVP
         mvp_member, mvp_time = members_data[0]
         embed.add_field(
             name="이번 주 MVP 🥇",
             value=f"{mvp_member.mention} ({fmt_time(mvp_time)})",
             inline=False
         )
-        next_week = week_num + 1
-        embed.set_footer(text=f"{month}월 {next_week}주차도 달려봅시다 💪")
+        embed.set_footer(text=f"{month}월 {week_num + 1}주차도 달려봅시다 💪")
         return embed
 
 
 # ──────────────────────────────────────────
-# 월간 결산 메시지 생성
+# 월간 결산
 # ──────────────────────────────────────────
 async def build_monthly_report(guild, year, month):
     async with aiosqlite.connect(config.DATABASE_NAME) as db:
         user_ids = await get_all_users_this_month(db, year, month)
         if not user_ids:
-            return f"📅 {month}월 기록이 없어요.", None
+            return f"📅 {month}월 기록이 없어요."
 
         members_data = []
         for uid in user_ids:
@@ -209,7 +219,6 @@ async def build_monthly_report(guild, year, month):
             if not member or member.bot:
                 continue
             total = await get_month_duration(db, uid, year, month)
-            # 주차별 이모지
             week_emojis = ""
             for week in calendar.monthcalendar(year, month):
                 dates = [datetime(year, month, d).date() for d in week if d != 0]
@@ -219,11 +228,16 @@ async def build_monthly_report(guild, year, month):
             members_data.append((member, total, week_emojis))
 
         if not members_data:
-            return f"📅 {month}월 기록이 없어요.", None
+            return f"📅 {month}월 기록이 없어요."
 
         members_data.sort(key=lambda x: x[1], reverse=True)
 
-        lines = [f"🗓 **{month}월 월간 결산**", "한 달 동안 정말 수고하셨어요 👏\n", "🏅 **이달의 순위**\n"]
+        lines = [
+            f"🗓 **{month}월 월간 결산**",
+            "한 달 동안 정말 수고하셨어요 👏\n",
+            "🏅 **이달의 순위**\n"
+        ]
+
         medals = ["🥇", "🥈", "🥉"]
         for i, (member, total, week_emojis) in enumerate(members_data):
             medal = medals[i] if i < 3 else f"{i+1}위"
@@ -239,24 +253,60 @@ async def build_monthly_report(guild, year, month):
                 lines.append(f"🔥 **개근상**   {member.mention} (한 주도 빠지지 않음!)")
                 break
 
-        # 성장상: 이번 달 기록 있는 사람 중 랜덤 응원 (전달 비교 데이터 없으므로 최하위 응원)
+        # 꼴찌 응원
         if len(members_data) > 1:
             last = members_data[-1][0]
             lines.append(f"📈 **다음 달엔 더 달려봐요**   {last.mention} 💪")
 
-        lines.append(f"\n---\n{month}월 데이터를 초기화합니다.\n{month+1}월도 화이팅! 🚀")
-
-        return "\n".join(lines), db
+        lines.append(f"\n---\n{month}월 데이터를 초기화합니다.\n{month + 1}월도 화이팅! 🚀")
+        return "\n".join(lines)
 
 
 # ──────────────────────────────────────────
-# 이벤트
+# 봇 이벤트
 # ──────────────────────────────────────────
 @bot.event
 async def on_ready():
     await init_db()
     main_scheduler.start()
     print(f"✅ {bot.user} 로그인 성공!")
+
+    # 재시작 시 세션 복구
+    for guild in bot.guilds:
+        voice_channel = guild.get_channel(config.VOICE_CHANNEL_ID)
+        if not voice_channel:
+            continue
+
+        async with aiosqlite.connect(config.DATABASE_NAME) as db:
+            # 현재 채널에 있는 멤버
+            current_members = {str(m.id) for m in voice_channel.members if not m.bot}
+
+            # DB에 남아있는 세션
+            cur = await db.execute("SELECT user_id, check_in FROM active_sessions")
+            db_sessions = {row[0]: row[1] for row in await cur.fetchall()}
+
+            # 케이스 1: DB에 있는데 지금 채널에 없음 → 봇 꺼진 사이 나간 것
+            # 봇 재시작 시간을 퇴장 시간으로 처리
+            for uid in list(db_sessions.keys()):
+                if uid not in current_members:
+                    check_out = datetime.now(KST)
+                    await save_session(db, uid, db_sessions[uid], check_out)
+                    await db.execute("DELETE FROM active_sessions WHERE user_id=?", (uid,))
+                    print(f"오프라인 중 퇴장 처리: {uid}")
+
+            # 케이스 2: 지금 채널에 있는데 DB에 없음 → 새로 체크인
+            for uid in current_members:
+                if uid not in db_sessions:
+                    now = datetime.now(KST)
+                    await db.execute(
+                        "INSERT INTO active_sessions (user_id, check_in) VALUES (?,?)",
+                        (uid, now.isoformat())
+                    )
+                    print(f"신규 세션 시작: {uid}")
+
+            # 케이스 3: 양쪽 다 있음 → 원래 체크인 시간 그대로 유지 (아무것도 안 함)
+
+            await db.commit()
 
 
 @bot.event
@@ -291,7 +341,6 @@ async def on_voice_state_update(member, before, after):
                 )
                 await db.commit()
 
-                # 입장 멘트
                 msg = get_join_message(member, now.hour)
                 await text_channel.send(msg)
 
@@ -308,24 +357,13 @@ async def on_voice_state_update(member, before, after):
             )
             row = await cur.fetchone()
             if row:
-                check_in = datetime.fromisoformat(row[0])
                 check_out = datetime.now(KST)
+                split_sessions = await save_session(db, str(member.id), row[0], check_out)
                 await db.execute(
                     "DELETE FROM active_sessions WHERE user_id=?", (str(member.id),)
                 )
-                split_sessions = split_session_by_day(check_in, check_out)
-                for s in split_sessions:
-                    await db.execute(
-                        "INSERT INTO attendance (user_id, check_in, check_out, duration, check_in_date) VALUES (?,?,?,?,?)",
-                        (
-                            str(member.id),
-                            s["check_in"], s["check_out"], s["duration"],
-                            datetime.fromisoformat(s["check_in"]).date().isoformat()
-                        )
-                    )
                 await db.commit()
 
-                # 퇴장 메시지
                 today_str = check_out.date().isoformat()
                 today_total = await get_duration_sum(db, str(member.id), today_str)
                 week_dates = get_week_dates(check_out.date())
@@ -396,8 +434,8 @@ async def main_scheduler():
     # 주간 결산: 매주 월요일 오전 9시
     if now.weekday() == 0 and now.hour == 9 and now.minute == 0 and last_task_run["weekly"] != today_str:
         last_task_run["weekly"] = today_str
-        last_week_monday = now.date() - timedelta(days=7)
-        week_dates = get_week_dates(last_week_monday)
+        last_monday = now.date() - timedelta(days=7)
+        week_dates = get_week_dates(last_monday)
         embed = await build_weekly_embed(guild, week_dates)
         if text_channel:
             await text_channel.send(embed=embed)
@@ -405,12 +443,12 @@ async def main_scheduler():
     # 월간 결산: 매월 1일 오전 9시
     if now.day == 1 and now.hour == 9 and now.minute == 0 and last_task_run["monthly"] != today_str:
         last_task_run["monthly"] = today_str
-        last_month = (now.date().replace(day=1) - timedelta(days=1))
-        report, _ = await build_monthly_report(guild, last_month.year, last_month.month)
+        last_month = now.date().replace(day=1) - timedelta(days=1)
+        report = await build_monthly_report(guild, last_month.year, last_month.month)
         if text_channel:
             await text_channel.send(report)
 
-        # DB 초기화 (지난 달 데이터 삭제)
+        # 지난 달 DB 초기화
         async with aiosqlite.connect(config.DATABASE_NAME) as db:
             start = f"{last_month.year}-{last_month.month:02d}-01"
             end = f"{last_month.year}-{last_month.month:02d}-{calendar.monthrange(last_month.year, last_month.month)[1]}"
