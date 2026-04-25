@@ -48,6 +48,26 @@ JOIN_MESSAGES_NIGHT = [
     "{mention} 님 새벽 자기계발 스타트 🌙 같이 하실 분?",
 ]
 
+# --- 퇴장 멘트 ---
+LEAVE_MESSAGES_DEFAULT = [
+    "{mention} 님 오늘도 수고하셨어요 👏",
+    "{mention} 님 고생하셨어요! 오늘 잘 달리셨네요 🔥",
+    "{mention} 님 퇴장! 오늘 하루도 열심히 하셨습니다 ✨",
+    "{mention} 님 오늘 작업 마무리! 내일도 달려봐요 💪",
+]
+
+LEAVE_MESSAGES_EVENING = [
+    "{mention} 님 퇴근 후 달리고 가시네요 👏 대단합니다",
+    "{mention} 님 저녁 시간 알차게 쓰셨어요 🔥",
+    "{mention} 님 오늘 저녁도 알차게! 수고하셨어요 ✨",
+]
+
+LEAVE_MESSAGES_NIGHT = [
+    "{mention} 님 새벽까지 하셨네요, 푹 쉬세요 🌙",
+    "{mention} 님 이 시간까지 고생하셨어요 😤 내일도 화이팅!",
+    "{mention} 님 새벽 작업 마무리! 오늘도 대단하셨어요 🌙",
+]
+
 # --- 인원수 이벤트 ---
 HEADCOUNT_MESSAGES = {
     2: "어? 작업방에 2명이 모였어요 👀 혼자 계신 분들 슬슬 오실 타이밍!",
