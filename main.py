@@ -34,6 +34,8 @@ last_task_run = defaultdict(lambda: None)
 # DB 초기화
 # ──────────────────────────────────────────
 async def init_db():
+    import os
+    os.makedirs("data", exist_ok=True)
     async with aiosqlite.connect(config.DATABASE_NAME) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS attendance (
